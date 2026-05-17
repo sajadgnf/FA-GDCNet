@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Editor
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project data — DO NOT COMMIT raw scraped Instagram images (TOS).
+datasets/raw/
+datasets/persian_multimodal_irony.jsonl
+artifacts/
+reports/*.csv
+reports/*.json
+reports/*.png
+reports/*.html
+reports/explain/
+
+# Keep directory placeholders
+!datasets/.gitkeep
+!artifacts/.gitkeep
+!reports/.gitkeep
+!notebooks/.gitkeep
