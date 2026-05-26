@@ -93,6 +93,35 @@ def attention_from_text(bundle, text: str) -> tuple[list[str], np.ndarray]:
     return tokens, scores
 
 
+def _ensure_eager_clip_attention(vision) -> None:
+    """SDPA/Flash attention backends do not populate `output_attentions`."""
+    tower = getattr(vision, "vision_model", vision)
+    config = getattr(tower, "config", None)
+    if config is not None and getattr(config, "_attn_implementation", None) != "eager":
+        config._attn_implementation = "eager"
+
+
+def _clip_vision_with_attentions(vision, pixel_values):
+    """Run only the CLIP vision tower (never the text encoder)."""
+    _ensure_eager_clip_attention(vision)
+    if hasattr(vision, "vision_model"):
+        return vision.vision_model(pixel_values=pixel_values, output_attentions=True)
+    return vision(pixel_values=pixel_values, output_attentions=True)
+
+
+def _layers_from_attentions(attentions) -> list[np.ndarray]:
+    layers: list[np.ndarray] = []
+    for attn in attentions or ():
+        if attn is None:
+            continue
+        layers.append(attn.squeeze(0).detach().cpu().numpy())
+    if not layers:
+        raise RuntimeError(
+            "CLIP vision returned no attention maps (need attn_implementation='eager')"
+        )
+    return layers
+
+
 def attention_from_image(bundle, image) -> np.ndarray:
     """Run the CLIP vision tower on `image` and return the rolled-out patch map.
 
@@ -100,10 +129,16 @@ def attention_from_image(bundle, image) -> np.ndarray:
     """
     import torch  # lazy
 
-    inputs = bundle.mclip_image_processor(images=image, return_tensors="pt").to(bundle.device)
+    vision = getattr(bundle, "mclip_image_attn", None) or bundle.mclip_image
+    processor = getattr(bundle, "mclip_image_attn_processor", None) or bundle.mclip_image_processor
+    inputs = processor(images=image, return_tensors="pt")
+    pixel_values = inputs.get("pixel_values")
+    if pixel_values is None:
+        raise ValueError("image processor did not return pixel_values for attention rollout")
+    pixel_values = pixel_values.to(bundle.device)
     with torch.no_grad():
-        out = bundle.mclip_image(**inputs, output_attentions=True)
-    layers = [a.squeeze(0).cpu().numpy() for a in out.attentions]
+        out = _clip_vision_with_attentions(vision, pixel_values)
+    layers = _layers_from_attentions(out.attentions)
     matrix = rollout(layers)
     # CLS row over patch tokens (drop the CLS column).
     patch_scores = matrix[0, 1:]

@@ -39,12 +39,38 @@ pip install -e ".[dev]"
 ### کوئیک‌استارت
 
 ```bash
-python tasks.py scrape --hashtag طبیعت --max-count 200
+# بدون اینستاگرام (دمو مصنوعی — برای تست خط لوله):
+python scripts/proposal_demo.py
+
+# با اینستاگرام (نیاز به لاگین — ر.ک. زیر):
+python tasks.py scrape --hashtag طبیعت --max-count 200 --session-user YOUR_IG_USERNAME
 python tasks.py label
 python tasks.py train
 python tasks.py eval
 python tasks.py dashboard
 ```
+
+### اسکرپ اینستاگرام (الزام لاگین)
+
+از سال ۲۰۲۴ به بعد، API عمومی اینستاگرام بدون ورود با خطای `403 login_required` پاسخ می‌دهد.
+
+**روش پیشنهادی — ذخیره session یک‌بار:**
+
+```bash
+pip install instaloader
+instaloader --login YOUR_INSTAGRAM_USERNAME
+python tasks.py scrape --hashtag طبیعت --max-count 200 --session-user YOUR_INSTAGRAM_USERNAME
+```
+
+**یا با رمز عبور (کمتر امن — فقط برای تست):**
+
+```powershell
+$env:INSTAGRAM_USERNAME="your_user"
+$env:INSTAGRAM_PASSWORD="your_pass"
+python tasks.py scrape --hashtag طبیعت --max-count 200
+```
+
+اگر اسکرپ ممکن نیست، از `python scripts/proposal_demo.py` برای آزمایش بقیه مراحل استفاده کنید.
 
 ### نکته حقوقی
 

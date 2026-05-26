@@ -30,10 +30,20 @@ DEFAULT_FVT_THRESHOLD: float = 0.2
 
 
 def _as_vec(x) -> np.ndarray:
-    arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    arr = np.nan_to_num(
+        np.asarray(x, dtype=np.float64).reshape(-1),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     if arr.size == 0:
         raise ValueError("expected a non-empty vector")
     return arr
+
+
+def _safe_norm(v: np.ndarray) -> float:
+    n = float(np.linalg.norm(v))
+    return n if np.isfinite(n) else 0.0
 
 
 def cosine_similarity(a, b) -> float:
@@ -42,11 +52,12 @@ def cosine_similarity(a, b) -> float:
     vb = _as_vec(b)
     if va.shape != vb.shape:
         raise ValueError(f"cosine_similarity: shape mismatch {va.shape} vs {vb.shape}")
-    na = float(np.linalg.norm(va))
-    nb = float(np.linalg.norm(vb))
+    na = _safe_norm(va)
+    nb = _safe_norm(vb)
     if na == 0.0 or nb == 0.0:
         return 0.0
-    return float(np.dot(va, vb) / (na * nb))
+    sim = float(np.dot(va, vb) / (na * nb))
+    return float(sim) if np.isfinite(sim) else 0.0
 
 
 def cosine_distance(a, b) -> float:
@@ -64,7 +75,8 @@ def polarity_scalar(probs) -> float:
     p = _as_vec(probs)
     if p.size < 2:
         raise ValueError("polarity vector must have at least 2 entries (neg, pos)")
-    return float(p[1] - p[0])
+    val = float(p[1] - p[0])
+    return val if np.isfinite(val) else 0.0
 
 
 def polarity_l1(probs_a, probs_b) -> float:
@@ -119,10 +131,11 @@ class DiscrepancyFeatures:
     polarity_T_hat: float
 
     def as_array(self) -> np.ndarray:
-        return np.array(
+        arr = np.array(
             [self.Dsem, self.Dsen, self.Fvt, self.cos_TI, self.polarity_T, self.polarity_T_hat],
             dtype=np.float32,
         )
+        return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
     def as_dict(self) -> dict[str, float]:
         return {

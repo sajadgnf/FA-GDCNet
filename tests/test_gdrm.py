@@ -42,6 +42,12 @@ def test_cosine_similarity_zero_norm_returns_zero():
     assert cosine_similarity(a, b) == 0.0
 
 
+def test_cosine_similarity_all_nan_inputs_return_zero():
+    a = np.array([np.nan, np.nan])
+    b = np.array([1.0, 2.0])
+    assert cosine_similarity(a, b) == 0.0
+
+
 def test_cosine_similarity_shape_mismatch_raises():
     with pytest.raises(ValueError):
         cosine_similarity(np.array([1.0, 2.0]), np.array([1.0, 2.0, 3.0]))

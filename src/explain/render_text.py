@@ -14,11 +14,22 @@ from __future__ import annotations
 import html
 from typing import Sequence
 
-from .rtl import remap_rtl_indices
+from .rtl import is_anchor, remap_rtl_indices
 
 # WordPiece / SentencePiece prefixes used by typical Persian tokenizers.
 _PIECE_PREFIXES = ("##",)
 _SP_PREFIX = "▁"  # SentencePiece
+# Attach to the previous token in RTL heatmaps (punctuation / affixes).
+_ATTACH_CHARS = frozenset("!.,;:?؟،٪٫…")
+_RLM = "\u200f"
+
+
+def _is_continuation_token(token: str) -> bool:
+    return token.startswith(_PIECE_PREFIXES)
+
+
+def _is_attach_to_previous(display: str) -> bool:
+    return bool(display) and all(ch in _ATTACH_CHARS for ch in display)
 
 
 def _clean_token(t: str) -> str:
@@ -42,45 +53,92 @@ def _normalize_scores(scores: Sequence[float]) -> list[float]:
     return [(s - lo) / span for s in scores]
 
 
+def _merge_tokens_for_display(
+    tokens: Sequence[str],
+    scores: Sequence[float],
+) -> tuple[list[str], list[float]]:
+    """Merge WordPiece fragments and trailing punctuation for natural RTL lines."""
+    merged_text: list[str] = []
+    merged_scores: list[float] = []
+    for tok, score in zip(tokens, scores):
+        piece = _clean_token(tok)
+        if not piece.strip():
+            continue
+        if merged_text and (_is_continuation_token(tok) or _is_attach_to_previous(piece)):
+            merged_text[-1] += piece
+            merged_scores[-1] = max(merged_scores[-1], float(score))
+        else:
+            merged_text.append(piece)
+            merged_scores.append(float(score))
+    return merged_text, merged_scores
+
+
+_RTL_BLOCK_STYLE = (
+    "direction:rtl;text-align:right;unicode-bidi:plaintext;"
+    "font-family:Tahoma,'Segoe UI',system-ui,sans-serif;line-height:2;"
+)
+
+
 def render_text_heatmap(
     tokens: Sequence[str],
     scores: Sequence[float],
     *,
     title: str | None = None,
     rtl: bool = True,
+    remap_tokens: bool | None = None,
+    hide_anchors: bool = True,
 ) -> str:
     """Return an HTML fragment with per-token attention highlighting.
 
-    Per spec, scores are remapped (not modified) for RTL rendering when
-    `rtl=True`. Set `rtl=False` to bypass the remap (useful for LTR captions).
+    When ``rtl=True`` (default), the browser lays out tokens right-to-left and
+    tokenizer order is kept as-is. Set ``remap_tokens=True`` only for LTR-only
+    viewers that need the legacy index reversal from ``remap_rtl_indices``.
     """
     if len(tokens) != len(scores):
         raise ValueError("tokens and scores must have the same length")
     toks = list(tokens)
     scrs = [float(s) for s in scores]
-    if rtl:
+    if remap_tokens is None:
+        remap_tokens = not rtl
+    if remap_tokens:
         toks, scrs = remap_rtl_indices(toks, scrs)
+    if hide_anchors:
+        pairs = [(t, s) for t, s in zip(toks, scrs) if not is_anchor(t)]
+        if pairs:
+            toks, scrs = zip(*pairs)
+            toks, scrs = list(toks), list(scrs)
+    toks, scrs = _merge_tokens_for_display(toks, scrs)
     normed = _normalize_scores(scrs)
 
     spans: list[str] = []
-    for tok, raw, norm in zip(toks, scrs, normed):
-        text = html.escape(_clean_token(tok))
-        # `rgba` with a fixed warm hue; opacity = normalised score.
+    for text_raw, raw, norm in zip(toks, scrs, normed):
+        text = html.escape(text_raw)
         style = (
             f"background:rgba(255,128,0,{norm:.3f});"
-            "padding:1px 3px;border-radius:3px;margin:0 1px;"
-            "font-family:Tahoma,'Iran Sans',sans-serif;"
+            "padding:0 2px;border-radius:3px;"
+            "display:inline;"
+            "font-family:Tahoma,'Segoe UI',system-ui,sans-serif;"
         )
         spans.append(
-            f'<span style="{style}" title="score={raw:.4f}">{text}</span>'
+            f'<bdi dir="rtl" style="{style}" title="score={raw:.4f}">{text}</bdi>'
         )
 
     direction = "rtl" if rtl else "ltr"
-    body = "".join(spans)
+    align = "right" if rtl else "left"
+    sep = " " if rtl else " "
+    body = sep.join(spans)
+    if rtl:
+        body = _RLM + body
+    block_style = _RTL_BLOCK_STYLE if rtl else f"direction:ltr;text-align:left;line-height:2;"
     parts: list[str] = []
     if title:
-        parts.append(f'<h4 style="margin:0 0 6px 0;">{html.escape(title)}</h4>')
-    parts.append(f'<div dir="{direction}" style="line-height:2;">{body}</div>')
+        parts.append(
+            f'<h4 dir="{direction}" style="margin:0 0 6px 0;text-align:{align};">'
+            f"{html.escape(title)}</h4>"
+        )
+    parts.append(
+        f'<div class="fa-rtl" dir="{direction}" lang="fa" style="{block_style}">{body}</div>'
+    )
     return "\n".join(parts)
 
 

@@ -20,8 +20,13 @@ ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 
 
+def _venv_python() -> str:
+    venv_py = ROOT / ".venv" / "Scripts" / "python.exe"
+    return str(venv_py) if venv_py.is_file() else sys.executable
+
+
 def _run(module: str, *args: str) -> int:
-    cmd = [sys.executable, "-m", module, *args]
+    cmd = [_venv_python(), "-m", module, *args]
     env_pythonpath = str(SRC)
     import os
 
@@ -43,6 +48,12 @@ def cmd_scrape(args: argparse.Namespace) -> int:
     extra: list[str] = ["--hashtag", args.hashtag, "--max-count", str(args.max_count)]
     if args.delay is not None:
         extra += ["--delay", str(args.delay)]
+    if getattr(args, "username", None):
+        extra += ["--username", args.username]
+    if getattr(args, "password", None):
+        extra += ["--password", args.password]
+    if getattr(args, "session_user", None):
+        extra += ["--session-user", args.session_user]
     return _run("data.scrape", *extra)
 
 
@@ -79,11 +90,13 @@ def cmd_eval(_: argparse.Namespace) -> int:
 
 
 def cmd_dashboard(_: argparse.Namespace) -> int:
-    dashboard_path = SRC / "explain" / "dashboard.py"
-    return subprocess.call(
-        [sys.executable, "-m", "streamlit", "run", str(dashboard_path)],
-        cwd=str(ROOT),
-    )
+    launcher = ROOT / "scripts" / "run_dashboard.py"
+    import os
+
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(SRC) + (os.pathsep + existing if existing else "")
+    return subprocess.call([_venv_python(), str(launcher)], cwd=str(ROOT), env=env)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_scrape.add_argument("--hashtag", required=True)
     p_scrape.add_argument("--max-count", type=int, default=200)
     p_scrape.add_argument("--delay", type=float, default=None)
+    p_scrape.add_argument("--username", default=None, help="Instagram login (or INSTAGRAM_USERNAME).")
+    p_scrape.add_argument("--password", default=None, help="Instagram password (or INSTAGRAM_PASSWORD).")
+    p_scrape.add_argument("--session-user", default=None, help="Reuse instaloader saved session.")
     p_scrape.set_defaults(func=cmd_scrape)
 
     p_label = sub.add_parser("label")
