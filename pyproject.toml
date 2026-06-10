@@ -25,7 +25,9 @@ dependencies = [
     "scikit-learn>=1.4,<2.0",
     "numpy>=1.26,<3.0",
     "pillow>=10.0",
-    "instaloader>=4.13",
+    # PyPI 4.15.1 breaks profile/following GraphQL; use patched build until upstream ships fix.
+    "instaloader @ git+https://github.com/npiriou/instaloader.git@fix/profile-metadata-query-flags",
+    "browser-cookie3>=0.19",
     "lancedb>=0.6",
     "pyarrow>=15.0",
     "streamlit>=1.32",

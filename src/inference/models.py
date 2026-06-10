@@ -332,8 +332,20 @@ def embed_text_mclip(bundle: BackboneBundle, text: str) -> np.ndarray:
     import torch
 
     text = (text or "").strip() or "."
+    tok = bundle.mclip_tokenizer
+    model = bundle.mclip_text
+    txt_tok = tok(
+        text,
+        padding=True,
+        truncation=True,
+        max_length=512,
+        return_tensors="pt",
+    ).to(bundle.device)
     with torch.no_grad():
-        emb = bundle.mclip_text.forward([text], bundle.mclip_tokenizer).cpu().numpy()[0]
+        embs = model.transformer(**txt_tok)[0]
+        att = txt_tok["attention_mask"]
+        pooled = (embs * att.unsqueeze(2)).sum(dim=1) / att.sum(dim=1)[:, None]
+        emb = model.LinearTransformation(pooled).cpu().numpy()[0]
     return _sanitize_embedding(emb)
 
 

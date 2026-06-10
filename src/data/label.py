@@ -136,10 +136,17 @@ def _select_pool_path(args: argparse.Namespace) -> Path:
         return Path(args.input)
     raw_dir = Path("datasets") / "raw"
     if not raw_dir.exists():
-        return Path("datasets") / "raw" / "all.jsonl"
+        return Path("datasets") / "raw" / "following.jsonl"
+    for stem in ("following", "profiles"):
+        preferred = raw_dir / f"{stem}.jsonl"
+        if preferred.is_file():
+            return preferred
+    profile_pools = sorted(raw_dir.glob("profile_*.jsonl"))
+    if profile_pools:
+        return profile_pools[0]
     jsonls = sorted(raw_dir.glob("*.jsonl"))
     if not jsonls:
-        return raw_dir / "all.jsonl"
+        return raw_dir / "following.jsonl"
     if len(jsonls) == 1:
         return jsonls[0]
     print("Available raw pools:")
