@@ -25,6 +25,7 @@ dependencies = [
     "scikit-learn>=1.4,<2.0",
     "numpy>=1.26,<3.0",
     "pillow>=10.0",
+    "opencv-python-headless>=4.8",
     # PyPI 4.15.1 breaks profile/following GraphQL; use patched build until upstream ships fix.
     "instaloader @ git+https://github.com/npiriou/instaloader.git@fix/profile-metadata-query-flags",
     "browser-cookie3>=0.19",

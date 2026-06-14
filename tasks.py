@@ -87,6 +87,7 @@ def cmd_scrape(args: argparse.Namespace) -> int:
     extra: list[str] = ["--max-count", str(args.max_count)]
     has_source = bool(
         args.hashtag
+        or getattr(args, "hashtags_file", None)
         or getattr(args, "profile", None)
         or getattr(args, "profiles_file", None)
         or getattr(args, "following", False)
@@ -96,6 +97,8 @@ def cmd_scrape(args: argparse.Namespace) -> int:
         extra.append("--following")
     if args.hashtag:
         extra += ["--hashtag", args.hashtag]
+    if getattr(args, "hashtags_file", None):
+        extra += ["--hashtags-file", args.hashtags_file]
     if getattr(args, "profile", None):
         for handle in args.profile:
             extra += ["--profile", handle]
@@ -121,6 +124,10 @@ def cmd_scrape(args: argparse.Namespace) -> int:
         extra += ["--session-user", args.session_user]
     if getattr(args, "session_file", None):
         extra += ["--session-file", args.session_file]
+    if getattr(args, "require_face", False):
+        extra.append("--require-face")
+    if getattr(args, "min_face_size", None) is not None:
+        extra += ["--min-face-size", str(args.min_face_size)]
     return _run("data.scrape", *extra)
 
 
@@ -187,7 +194,11 @@ def build_parser() -> argparse.ArgumentParser:
     scrape_src = p_scrape.add_mutually_exclusive_group(required=False)
     scrape_src.add_argument(
         "--hashtag",
-        help="[legacy] Hashtag without # — mostly landscapes/ads; prefer --following.",
+        help="Single hashtag without # — public posts from any account.",
+    )
+    scrape_src.add_argument(
+        "--hashtags-file",
+        help="File with hashtags (one per line) — discover posts beyond your account list.",
     )
     scrape_src.add_argument(
         "--profile",
@@ -213,6 +224,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_scrape.add_argument("--posts-per-profile", type=int, default=15)
     p_scrape.add_argument("--max-profiles", type=int, default=30)
     p_scrape.add_argument("--pool-name", default=None, help="Output JSONL basename override.")
+    p_scrape.add_argument(
+        "--require-face",
+        action="store_true",
+        help="Skip images with no detected frontal face (landscapes, logos, etc.).",
+    )
+    p_scrape.add_argument("--min-face-size", type=int, default=40)
     p_scrape.add_argument("--delay", type=float, default=None)
     p_scrape.add_argument("--username", default=None, help="Instagram login (or INSTAGRAM_USERNAME).")
     p_scrape.add_argument("--password", default=None, help="Instagram password (or INSTAGRAM_PASSWORD).")

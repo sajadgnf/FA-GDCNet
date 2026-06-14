@@ -26,6 +26,11 @@ from typing import Iterable, Iterator, Protocol
 
 from .preprocess import is_persian_enough, preprocess_caption
 
+try:
+    from .face_filter import has_face as _image_has_face
+except ImportError:  # opencv optional in minimal installs
+    _image_has_face = None  # type: ignore[assignment]
+
 log = logging.getLogger(__name__)
 
 DEFAULT_RAW_DIR = Path("datasets") / "raw"
@@ -65,11 +70,18 @@ def _persist(
     *,
     delay: float,
     max_count: int,
+    require_face: bool = False,
+    min_face_size: int = 40,
 ) -> int:
     seen = _existing_shortcodes(jsonl_path)
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     image_dir.mkdir(parents=True, exist_ok=True)
+    if require_face and _image_has_face is None:
+        raise SystemExit(
+            "Face filter requires opencv. Install with: pip install opencv-python-headless"
+        )
     written = 0
+    skipped_no_face = 0
     with jsonl_path.open("a", encoding="utf-8") as out:
         for post in posts:
             if written >= max_count:
@@ -88,6 +100,12 @@ def _persist(
             except Exception as exc:  # noqa: BLE001
                 log.warning("skip %s: image download failed (%s)", sc, exc)
                 continue
+            if require_face and not _image_has_face(image_path, min_size=min_face_size):
+                skipped_no_face += 1
+                log.debug("skip %s: no face detected", sc)
+                with suppress(OSError):
+                    image_path.unlink()
+                continue
             row = {
                 "post_id": sc,
                 "caption": caption,
@@ -97,6 +115,8 @@ def _persist(
             seen.add(sc)
             written += 1
             time.sleep(delay)
+    if require_face and skipped_no_face:
+        log.info("skipped %d posts with no detected face", skipped_no_face)
     return written
 
 
@@ -260,13 +280,19 @@ def _iter_instaloader_posts(
 
     try:
         hashtag_obj = instaloader.Hashtag.from_name(loader.context, hashtag)
+    except instaloader.exceptions.QueryReturnedNotFoundException:
+        log.warning("skip hashtag %s: not found", hashtag)
+        return
     except instaloader.exceptions.ConnectionException as exc:
         if "login_required" in str(exc).lower():
             raise SystemExit(
                 "Instagram returned login_required. Use --username/--password or a saved session.\n"
                 "See README section 'Instagram scraping (login required)'."
             ) from exc
-        raise
+        log.warning("skip hashtag %s: connection error (%s)", hashtag, exc)
+        return
+
+    log.info("scraping hashtag #%s", hashtag)
 
     # Instaloader 4.9+ deprecated get_posts(); get_posts_resumable() matches current IG API.
     post_iter = (
@@ -309,7 +335,8 @@ def _iter_profile_posts(
             raise SystemExit(
                 "Instagram returned login_required. Use --username/--password or a saved session."
             ) from exc
-        raise
+        log.warning("skip profile %s: connection error (%s)", handle, exc)
+        return
 
     try:
         private = profile.is_private and not profile.followed_by_viewer
@@ -488,6 +515,36 @@ def _load_profile_names(path: Path) -> list[str]:
     return names
 
 
+def _load_hashtags(path: Path) -> list[str]:
+    tags: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip().lstrip("#")
+            if not line or line.startswith("#"):
+                continue
+            tags.append(line)
+    return tags
+
+
+def _iter_multi_hashtag_posts(
+    hashtags: list[str],
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    session_user: str | None = None,
+    session_file: str | None = None,
+) -> Iterator[ScrapedPost]:
+    """Yield photo posts from public hashtag feeds (any account worldwide)."""
+    for tag in hashtags:
+        yield from _iter_instaloader_posts(
+            tag,
+            username=username,
+            password=password,
+            session_user=session_user,
+            session_file=session_file,
+        )
+
+
 def _iter_multi_profile_posts(
     profile_names: list[str],
     *,
@@ -513,6 +570,8 @@ def _resolve_pool_name(args: argparse.Namespace) -> str:
         return args.pool_name
     if args.hashtag:
         return args.hashtag
+    if getattr(args, "hashtags_file", None):
+        return "hashtags"
     if args.following:
         return "following"
     if getattr(args, "followers_of", None):
@@ -529,7 +588,14 @@ def _resolve_pool_name(args: argparse.Namespace) -> str:
 
 
 def _default_source(args: argparse.Namespace) -> None:
-    if any((args.hashtag, args.profile, args.profiles_file, args.following, args.followers_of)):
+    if any((
+        args.hashtag,
+        getattr(args, "hashtags_file", None),
+        args.profile,
+        args.profiles_file,
+        args.following,
+        args.followers_of,
+    )):
         return
     accounts = DEFAULT_RAW_DIR / "accounts.txt"
     if accounts.is_file() and _load_profile_names(accounts):
@@ -550,7 +616,12 @@ def main(argv: list[str] | None = None) -> int:
     source = parser.add_mutually_exclusive_group(required=False)
     source.add_argument(
         "--hashtag",
-        help="[legacy] Hashtag without # — usually landscapes/ads, not personal daily posts.",
+        help="Single hashtag without # — public posts from any account using that tag.",
+    )
+    source.add_argument(
+        "--hashtags-file",
+        type=Path,
+        help="File with hashtags (one per line) — browse Instagram beyond your account list.",
     )
     source.add_argument(
         "--profile",
@@ -592,6 +663,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Output basename (default: hashtag, profile_<user>, profiles, or following).",
     )
     parser.add_argument("--delay", type=float, default=DEFAULT_REQUEST_DELAY)
+    parser.add_argument(
+        "--require-face",
+        action="store_true",
+        help="Keep only images where OpenCV detects at least one frontal face.",
+    )
+    parser.add_argument(
+        "--min-face-size",
+        type=int,
+        default=40,
+        help="Minimum face box side in pixels for --require-face (default: 40).",
+    )
     parser.add_argument(
         "--out-dir",
         type=Path,
@@ -640,6 +722,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.hashtag:
         posts = _iter_instaloader_posts(args.hashtag, **auth)
+    elif args.hashtags_file:
+        tags = _load_hashtags(args.hashtags_file)
+        if not tags:
+            raise SystemExit(f"No hashtags in {args.hashtags_file}")
+        posts = _iter_multi_hashtag_posts(tags, **auth)
     elif args.following:
         posts = _iter_following_posts(
             **auth,
@@ -671,6 +758,8 @@ def main(argv: list[str] | None = None) -> int:
         image_dir,
         delay=args.delay,
         max_count=args.max_count,
+        require_face=args.require_face,
+        min_face_size=args.min_face_size,
     )
     log.info("wrote %d new posts to %s (already-seen ones skipped)", n, jsonl_path)
     return 0
