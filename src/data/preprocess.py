@@ -84,3 +84,59 @@ def persian_ratio(text: str) -> float:
 def is_persian_enough(text: str, *, min_ratio: float = 0.5) -> bool:
     """Spec scenario "Language filter": at least 50 percent Persian letters."""
     return persian_ratio(text) >= min_ratio
+
+
+# Promo / AI-spam captions common under #سلفی (comment-bait, prompt sales, fake celebrity selfies).
+_SPAM_SUBSTRINGS_FA = (
+    "هوش مصنوعی",
+    "هوش_مصنوعی",
+    "پرامپت",
+    "پرامپ",
+    "تصویر مرجع",
+    "واترمارک",
+    "آپلود کنید",
+    "دستورالعمل",
+    "کامنت کن",
+    "کامنت‌کن",
+    "دایرکت",
+    "فالو کن",
+    "فالوم کن",
+    "لایک کن",
+    "ربات نمیتونه",
+    "ربات نمیتواند",
+    "برای دریافت پرامپت",
+    "سلبریتی ها عکس",
+    "عکس سلبریتی",
+    "با سلبریتی",
+    "پیام بده",
+    "کلمه «",
+    "کلمه \"",
+    "وارد  gemini",
+    "چت جی پی تی",
+    "چت_جی_پی_تی",
+)
+_SPAM_SUBSTRINGS_LATIN = (
+    "prompt",
+    "gemini",
+    "chatgpt",
+    "chat gpt",
+    "midjourney",
+    "openai",
+    "#aiart",
+    "ai art",
+)
+
+
+def is_spam_caption(text: str) -> bool:
+    """True for comment-bait / AI-prompt spam captions the annotator skipped."""
+    if not text:
+        return False
+    lower = text.lower()
+    if any(s in lower for s in _SPAM_SUBSTRINGS_LATIN):
+        return True
+    if any(s in text for s in _SPAM_SUBSTRINGS_FA):
+        return True
+    # Long copy-paste AI image-generation instructions.
+    if len(text) > 450 and any(k in text for k in ("پنل", "نورپردازی", "زاویه دید", "ایربراش")):
+        return True
+    return False

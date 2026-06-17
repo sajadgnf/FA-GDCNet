@@ -24,7 +24,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Iterable, Iterator, Protocol
 
-from .preprocess import is_persian_enough, preprocess_caption
+from .preprocess import is_persian_enough, is_spam_caption, preprocess_caption
 
 try:
     from .face_filter import has_face as _image_has_face
@@ -35,6 +35,28 @@ log = logging.getLogger(__name__)
 
 DEFAULT_RAW_DIR = Path("datasets") / "raw"
 DEFAULT_REQUEST_DELAY = 4.0  # seconds; safe default for unauthenticated instaloader.
+IGNORED_IDS_FILE = DEFAULT_RAW_DIR / "ignored_post_ids.txt"
+
+
+def _load_ignored_shortcodes() -> set[str]:
+    if not IGNORED_IDS_FILE.exists():
+        return set()
+    out: set[str] = set()
+    with IGNORED_IDS_FILE.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                out.add(line)
+    return out
+
+
+def _remember_ignored(shortcode: str) -> None:
+    known = _load_ignored_shortcodes()
+    if shortcode in known:
+        return
+    IGNORED_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with IGNORED_IDS_FILE.open("a", encoding="utf-8") as f:
+        f.write(shortcode + "\n")
 
 
 class ScrapedPost(Protocol):
@@ -50,16 +72,15 @@ class ScrapedPost(Protocol):
 
 
 def _existing_shortcodes(jsonl_path: Path) -> set[str]:
-    if not jsonl_path.exists():
-        return set()
-    seen: set[str] = set()
-    with jsonl_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            with suppress(json.JSONDecodeError, KeyError):
-                seen.add(json.loads(line)["post_id"])
+    seen = _load_ignored_shortcodes()
+    if jsonl_path.exists():
+        with jsonl_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                with suppress(json.JSONDecodeError, KeyError):
+                    seen.add(json.loads(line)["post_id"])
     return seen
 
 
@@ -82,6 +103,7 @@ def _persist(
         )
     written = 0
     skipped_no_face = 0
+    skipped_spam = 0
     with jsonl_path.open("a", encoding="utf-8") as out:
         for post in posts:
             if written >= max_count:
@@ -94,6 +116,11 @@ def _persist(
             caption = preprocess_caption(raw_caption)
             if not is_persian_enough(caption):
                 log.debug("skip non-persian %s", sc)
+                continue
+            if is_spam_caption(caption):
+                skipped_spam += 1
+                _remember_ignored(sc)
+                log.debug("skip spam/bait caption %s", sc)
                 continue
             try:
                 image_path = post.download_image(image_dir / f"{sc}.jpg")
@@ -117,6 +144,8 @@ def _persist(
             time.sleep(delay)
     if require_face and skipped_no_face:
         log.info("skipped %d posts with no detected face", skipped_no_face)
+    if skipped_spam:
+        log.info("skipped %d spam/bait captions (saved to %s)", skipped_spam, IGNORED_IDS_FILE)
     return written
 
 
@@ -261,22 +290,35 @@ def _login_loader(
     return loader
 
 
-def _iter_instaloader_posts(
-    hashtag: str,
-    *,
-    username: str | None = None,
-    password: str | None = None,
-    session_user: str | None = None,
-    session_file: str | None = None,
-) -> Iterator[ScrapedPost]:
+def _resolve_profile(loader, handle: str):
+    """Load a Profile; prefer web_profile_info (search-based lookup often fails)."""
     import instaloader
 
-    loader = _login_loader(
-        username=username,
-        password=password,
-        session_user=session_user,
-        session_file=session_file,
+    try:
+        data = loader.context.get_iphone_json(
+            "api/v1/users/web_profile_info/",
+            {"username": handle},
+        )
+        user = data.get("data", {}).get("user")
+        if user and user.get("username", "").lower() == handle.lower():
+            return instaloader.Profile.from_iphone_struct(loader.context, user)
+    except instaloader.exceptions.ConnectionException as exc:
+        log.debug("web_profile_info failed for %s: %s", handle, exc)
+
+    try:
+        return instaloader.Profile.from_username(loader.context, handle)
+    except instaloader.exceptions.ProfileNotExistsException:
+        pass
+    raise instaloader.exceptions.ProfileNotExistsException(
+        f"Profile {handle} does not exist."
     )
+
+
+def _iter_hashtag_posts(
+    hashtag: str,
+    loader,
+) -> Iterator[ScrapedPost]:
+    import instaloader
 
     try:
         hashtag_obj = instaloader.Hashtag.from_name(loader.context, hashtag)
@@ -293,8 +335,6 @@ def _iter_instaloader_posts(
         return
 
     log.info("scraping hashtag #%s", hashtag)
-
-    # Instaloader 4.9+ deprecated get_posts(); get_posts_resumable() matches current IG API.
     post_iter = (
         hashtag_obj.get_posts_resumable()
         if hasattr(hashtag_obj, "get_posts_resumable")
@@ -306,27 +346,35 @@ def _iter_instaloader_posts(
         yield _InstaloaderPost(post, loader)
 
 
-def _iter_profile_posts(
-    profile_name: str,
+def _iter_instaloader_posts(
+    hashtag: str,
     *,
     username: str | None = None,
     password: str | None = None,
     session_user: str | None = None,
     session_file: str | None = None,
-    posts_per_profile: int | None = None,
 ) -> Iterator[ScrapedPost]:
-    """Yield recent photo posts from one public (or followed) Instagram account."""
-    import instaloader
-
     loader = _login_loader(
         username=username,
         password=password,
         session_user=session_user,
         session_file=session_file,
     )
+    yield from _iter_hashtag_posts(hashtag, loader)
+
+
+def _iter_profile_posts(
+    profile_name: str,
+    loader,
+    *,
+    posts_per_profile: int | None = None,
+) -> Iterator[ScrapedPost]:
+    """Yield recent photo posts from one public (or followed) Instagram account."""
+    import instaloader
+
     handle = profile_name.lstrip("@").strip()
     try:
-        profile = instaloader.Profile.from_username(loader.context, handle)
+        profile = _resolve_profile(loader, handle)
     except instaloader.exceptions.ProfileNotExistsException:
         log.warning("skip profile %s: not found", handle)
         return
@@ -396,7 +444,7 @@ def _iter_following_posts(
     if not viewer:
         raise SystemExit("--following requires --session-user (the account whose followees to scan).")
 
-    profile = instaloader.Profile.from_username(loader.context, viewer)
+    profile = _resolve_profile(loader, viewer)
     try:
         followees_iter = profile.get_followees()
     except QueryReturnedBadRequestException as exc:
@@ -463,7 +511,7 @@ def _iter_followers_of_posts(
     viewer = (session_user or username or os.environ.get("INSTAGRAM_USERNAME") or "").strip()
 
     try:
-        profile = instaloader.Profile.from_username(loader.context, handle)
+        profile = _resolve_profile(loader, handle)
     except instaloader.exceptions.ProfileNotExistsException:
         raise SystemExit(f"Instagram profile @{handle} does not exist.") from None
 
@@ -496,10 +544,7 @@ def _iter_followers_of_posts(
         log.info("scraping follower @%s of @%s", fan, handle)
         yield from _iter_profile_posts(
             fan,
-            username=username,
-            password=password,
-            session_user=session_user,
-            session_file=session_file,
+            loader,
             posts_per_profile=posts_per_profile,
         )
 
@@ -519,10 +564,10 @@ def _load_hashtags(path: Path) -> list[str]:
     tags: list[str] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip().lstrip("#")
-            if not line or line.startswith("#"):
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
                 continue
-            tags.append(line)
+            tags.append(raw.lstrip("#"))
     return tags
 
 
@@ -533,16 +578,19 @@ def _iter_multi_hashtag_posts(
     password: str | None = None,
     session_user: str | None = None,
     session_file: str | None = None,
+    hashtag_pause: float = 10.0,
 ) -> Iterator[ScrapedPost]:
     """Yield photo posts from public hashtag feeds (any account worldwide)."""
-    for tag in hashtags:
-        yield from _iter_instaloader_posts(
-            tag,
-            username=username,
-            password=password,
-            session_user=session_user,
-            session_file=session_file,
-        )
+    loader = _login_loader(
+        username=username,
+        password=password,
+        session_user=session_user,
+        session_file=session_file,
+    )
+    for i, tag in enumerate(hashtags):
+        if i:
+            time.sleep(hashtag_pause)
+        yield from _iter_hashtag_posts(tag, loader)
 
 
 def _iter_multi_profile_posts(
@@ -553,14 +601,20 @@ def _iter_multi_profile_posts(
     session_user: str | None = None,
     session_file: str | None = None,
     posts_per_profile: int = 15,
+    profile_pause: float = 6.0,
 ) -> Iterator[ScrapedPost]:
-    for name in profile_names:
+    loader = _login_loader(
+        username=username,
+        password=password,
+        session_user=session_user,
+        session_file=session_file,
+    )
+    for i, name in enumerate(profile_names):
+        if i:
+            time.sleep(profile_pause)
         yield from _iter_profile_posts(
             name,
-            username=username,
-            password=password,
-            session_user=session_user,
-            session_file=session_file,
+            loader,
             posts_per_profile=posts_per_profile,
         )
 

@@ -32,7 +32,6 @@ Thumbs.db
 
 # Project data — DO NOT COMMIT raw scraped Instagram images (TOS).
 datasets/raw/
-datasets/persian_multimodal_irony.jsonl
 artifacts/
 reports/*.csv
 reports/*.json
