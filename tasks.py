@@ -151,6 +151,15 @@ def cmd_label(args: argparse.Namespace) -> int:
     return _run("data.label", *extra)
 
 
+def cmd_prune_pool(args: argparse.Namespace) -> int:
+    extra: list[str] = ["--input", args.input]
+    if args.annotator:
+        extra += ["--annotator", args.annotator]
+    if args.dry_run:
+        extra.append("--dry-run")
+    return _run("data.prune_pool", *extra)
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     extra: list[str] = []
     if args.dataset:
@@ -247,6 +256,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_label.add_argument("--annotator", default=None)
     p_label.add_argument("--input", default=None)
     p_label.set_defaults(func=cmd_label)
+
+    p_prune = sub.add_parser(
+        "prune-pool",
+        help="Archive unlabeled posts, remove from pool, add to scrape ignore list.",
+    )
+    p_prune.add_argument("--input", required=True, help="Raw pool JSONL (e.g. datasets/raw/hashtags.jsonl).")
+    p_prune.add_argument("--annotator", default=None)
+    p_prune.add_argument("--dry-run", action="store_true")
+    p_prune.set_defaults(func=cmd_prune_pool)
 
     p_boot = sub.add_parser(
         "label-bootstrap",
