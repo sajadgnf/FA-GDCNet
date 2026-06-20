@@ -1,0 +1,41 @@
+# Public hashtag discovery — one tag per line (lines starting with # are ignored).
+# Selfies & portraits
+سلفی
+سلفی_آینه
+پرتره
+عکاسی_پرتره
+selfie
+
+# Daily life & mood
+روزمره
+روزمرگی
+لحظات
+خاطره
+خاطرات
+زندگی_روزمره
+لایفستایل
+
+# Social & friends
+دوستان
+دوستی
+رفاقت
+خانواده
+
+
+# Mood & captions
+حس_خوب
+خوشحالی
+شادی
+انگیزشی
+
+# Humor
+طنز
+فان
+
+# Places & lifestyle (often have faces)
+کافه
+کافه_گردی
+دانشگاه
+
+# Discovery
+اکسپلور

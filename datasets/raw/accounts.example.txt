@@ -1,0 +1,9 @@
+# Copy this file to accounts.txt and add Instagram usernames you follow.
+# One username per line (no @). Lines starting with # are ignored.
+#
+# Pick people who post daily-life photos with Persian captions — friends,
+# family, Persian meme/lifestyle pages you actually read.
+#
+# friend_username
+# cousin_username
+# favorite_persian_page

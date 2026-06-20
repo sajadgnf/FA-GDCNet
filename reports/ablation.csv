@@ -1,0 +1,8 @@
+configuration,n_features,mean_accuracy,mean_macro_f1
+Dsem,4,1.0,1.0
+Dsen,4,1.0,1.0
+Fvt,4,1.0,1.0
+Dsem+Dsen,5,1.0,1.0
+Dsem+Fvt,5,1.0,1.0
+Dsen+Fvt,5,1.0,1.0
+Dsem+Dsen+Fvt,6,1.0,1.0
