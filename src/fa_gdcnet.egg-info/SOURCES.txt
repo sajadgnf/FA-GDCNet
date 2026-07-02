@@ -1,9 +1,12 @@
 README.md
 pyproject.toml
 src/data/__init__.py
+src/data/bootstrap_labels.py
+src/data/face_filter.py
 src/data/iaa.py
 src/data/label.py
 src/data/preprocess.py
+src/data/prune_pool.py
 src/data/schema.py
 src/data/scrape.py
 src/eval/__init__.py
@@ -18,6 +21,7 @@ src/explain/render_image.py
 src/explain/render_text.py
 src/explain/rollout.py
 src/explain/rtl.py
+src/explain/ui.py
 src/fa_gdcnet.egg-info/PKG-INFO
 src/fa_gdcnet.egg-info/SOURCES.txt
 src/fa_gdcnet.egg-info/dependency_links.txt
@@ -29,11 +33,15 @@ src/inference/classifier.py
 src/inference/gdrm.py
 src/inference/models.py
 src/inference/pipeline.py
+src/inference/smolvlm_check.py
 src/inference/store.py
+tests/test_face_filter.py
 tests/test_gdrm.py
 tests/test_iaa.py
 tests/test_pipeline.py
 tests/test_preprocess.py
+tests/test_preprocess_spam.py
+tests/test_prune_pool.py
 tests/test_rollout.py
 tests/test_rtl.py
 tests/test_rtl_render.py

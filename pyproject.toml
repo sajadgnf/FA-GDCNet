@@ -45,6 +45,9 @@ dev = [
     "pytest-cov>=4.1",
     "ruff>=0.4",
 ]
+browser = [
+    "playwright>=1.42",
+]
 
 [project.scripts]
 fa-gdcnet = "fa_gdcnet_cli:main"

@@ -8,4 +8,4 @@ _No overlapping samples between annotators yet._
 
 | Annotator | Labeled posts |
 | --- | --- |
-| sjjd6502 | 162 |
+| sjjd6502 | 302 |

@@ -1,46 +1,46 @@
-# # Byte-compiled / optimized / DLL files
-# __pycache__/
-# *.py[cod]
-# *$py.class
-# *.so
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-# # Distribution / packaging
-# build/
-# dist/
-# *.egg-info/
-# *.egg
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
 
-# # Virtual envs
-# .venv/
-# venv/
-# env/
+# Virtual envs
+.venv/
+venv/
+env/
 
-# # Test & coverage
-# .pytest_cache/
-# .coverage
-# htmlcov/
-# .mypy_cache/
-# .ruff_cache/
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
-# # Editor
-# .idea/
-# .vscode/
+# Editor
+.idea/
+.vscode/
 
-# # OS
-# .DS_Store
-# Thumbs.db
+# OS
+.DS_Store
+Thumbs.db
 
-# # Project data — DO NOT COMMIT raw scraped Instagram images (TOS).
-# datasets/raw/
-# artifacts/
-# reports/*.csv
-# reports/*.json
-# reports/*.png
-# reports/*.html
-# reports/explain/
+# Project data — DO NOT COMMIT raw scraped Instagram images (TOS).
+datasets/raw/
+artifacts/
+reports/*.csv
+reports/*.json
+reports/*.png
+reports/*.html
+reports/explain/
 
-# # Keep directory placeholders
-# !datasets/.gitkeep
-# !artifacts/.gitkeep
-# !reports/.gitkeep
-# !notebooks/.gitkeep
+# Keep directory placeholders
+!datasets/.gitkeep
+!artifacts/.gitkeep
+!reports/.gitkeep
+!notebooks/.gitkeep

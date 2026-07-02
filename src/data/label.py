@@ -28,6 +28,7 @@ from typing import Iterable, Iterator
 
 from .iaa import compute_and_write
 from .schema import LABELS
+from .scrape import _remember_ignored
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +132,19 @@ def _prompt_one(pool_entry: dict) -> str | None:
         print("invalid choice, try again.")
 
 
+def _load_all_pool_entries(raw_dir: Path) -> dict[str, dict]:
+    """Merge every raw JSONL pool so canonical rebuild keeps cross-pool labels."""
+    merged: dict[str, dict] = {}
+    if not raw_dir.is_dir():
+        return merged
+    for path in sorted(raw_dir.glob("*.jsonl")):
+        if path.name.startswith("test_"):
+            continue
+        for row in _iter_input_pool(path):
+            merged[row["post_id"]] = row
+    return merged
+
+
 def _select_pool_path(args: argparse.Namespace) -> Path:
     if args.input:
         return Path(args.input)
@@ -196,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             if choice is None or choice == "q":
                 break
             if choice == "s":
+                _remember_ignored(entry["post_id"])
                 continue
             if choice == "u":
                 if last_written_offset is None:
@@ -223,7 +238,9 @@ def main(argv: list[str] | None = None) -> int:
             raw_out.flush()
             audit_rows.append(row)
 
-    canonical = _build_canonical(audit_rows, pool)
+    all_pool = _load_all_pool_entries(Path("datasets") / "raw")
+    all_pool.update(pool)
+    canonical = _build_canonical(audit_rows, all_pool)
     _persist_canonical(canonical, args.dataset)
     compute_and_write(args.raw_log, args.report)
     print(f"\nwrote {len(canonical)} records to {args.dataset}")

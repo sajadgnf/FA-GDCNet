@@ -64,10 +64,9 @@ def cmd_scrape_session(args: argparse.Namespace) -> int:
         args.browser,
         "-f",
         str(session_file),
-        "profile",
-        user,
-        "--no-posts",
-        "--no-profile-pic",
+        # No profile/hashtag targets — only import cookies and save session.
+        # Adding "profile USER" triggers extra GraphQL calls that often fail on
+        # filtered networks even when cookie login succeeded.
     ]
     print(f"$ {' '.join(cmd)}")
     rc = sp.call(cmd, cwd=str(ROOT))
@@ -128,7 +127,57 @@ def cmd_scrape(args: argparse.Namespace) -> int:
         extra.append("--require-face")
     if getattr(args, "min_face_size", None) is not None:
         extra += ["--min-face-size", str(args.min_face_size)]
+    if getattr(args, "request_timeout", None) is not None:
+        extra += ["--request-timeout", str(args.request_timeout)]
+    if getattr(args, "max_connection_attempts", None) is not None:
+        extra += ["--max-connection-attempts", str(args.max_connection_attempts)]
     return _run("data.scrape", *extra)
+
+
+def cmd_import_pool(args: argparse.Namespace) -> int:
+    extra: list[str] = []
+    if args.input_dir:
+        extra += ["--input-dir", args.input_dir]
+    if args.manifest:
+        extra += ["--manifest", args.manifest]
+    if args.pool_name:
+        extra += ["--pool-name", args.pool_name]
+    if getattr(args, "require_face", False):
+        extra.append("--require-face")
+    if getattr(args, "min_face_size", None) is not None:
+        extra += ["--min-face-size", str(args.min_face_size)]
+    return _run("data.import_pool", *extra)
+
+
+def cmd_import_links(args: argparse.Namespace) -> int:
+    extra: list[str] = ["--links", args.links]
+    if args.pool_name:
+        extra += ["--pool-name", args.pool_name]
+    if getattr(args, "require_face", False):
+        extra.append("--require-face")
+    if getattr(args, "delay", None) is not None:
+        extra += ["--delay", str(args.delay)]
+    if getattr(args, "timeout", None) is not None:
+        extra += ["--timeout", str(args.timeout)]
+    return _run("data.scrape_embed", *extra)
+
+
+def cmd_collect_hashtags(args: argparse.Namespace) -> int:
+    extra: list[str] = ["--hashtags-file", args.hashtags_file]
+    if args.pool_name:
+        extra += ["--pool-name", args.pool_name]
+    extra += ["--max-count", str(args.max_count)]
+    if getattr(args, "require_face", False):
+        extra.append("--require-face")
+    if getattr(args, "delay", None) is not None:
+        extra += ["--delay", str(args.delay)]
+    if getattr(args, "headed", False):
+        extra.append("--headed")
+    if getattr(args, "scrolls", None) is not None:
+        extra += ["--scrolls", str(args.scrolls)]
+    if getattr(args, "browser", None):
+        extra += ["--browser", args.browser]
+    return _run("data.collect_browser", *extra)
 
 
 def cmd_bootstrap_labels(args: argparse.Namespace) -> int:
@@ -240,11 +289,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_scrape.add_argument("--min-face-size", type=int, default=40)
     p_scrape.add_argument("--delay", type=float, default=None)
+    p_scrape.add_argument("--request-timeout", type=float, default=None)
+    p_scrape.add_argument("--max-connection-attempts", type=int, default=None)
     p_scrape.add_argument("--username", default=None, help="Instagram login (or INSTAGRAM_USERNAME).")
     p_scrape.add_argument("--password", default=None, help="Instagram password (or INSTAGRAM_PASSWORD).")
     p_scrape.add_argument("--session-user", default=None, help="Reuse instaloader saved session.")
     p_scrape.add_argument("--session-file", default=None, help="Explicit path to instaloader session file.")
     p_scrape.set_defaults(func=cmd_scrape)
+
+    p_import = sub.add_parser(
+        "import-pool",
+        help="Import locally saved images into a raw pool (no Instagram API).",
+    )
+    p_import.add_argument(
+        "--input-dir",
+        default="datasets/raw/inbox",
+        help="Folder with <post_id>.jpg and optional <post_id>.txt caption.",
+    )
+    p_import.add_argument(
+        "--manifest",
+        default=None,
+        help="Optional JSONL manifest (post_id, caption, image_path).",
+    )
+    p_import.add_argument("--pool-name", default="hashtags")
+    p_import.add_argument(
+        "--require-face",
+        action="store_true",
+        help="Keep only images with a detected frontal face.",
+    )
+    p_import.add_argument("--min-face-size", type=int, default=40)
+    p_import.set_defaults(func=cmd_import_pool)
+
+    p_links = sub.add_parser(
+        "import-links",
+        help="Import post URLs via embed pages (works when instaloader API times out).",
+    )
+    p_links.add_argument(
+        "--links",
+        default="datasets/raw/links.txt",
+        help="File with instagram.com/p/... URLs or shortcodes, one per line.",
+    )
+    p_links.add_argument("--pool-name", default="hashtags")
+    p_links.add_argument("--require-face", action="store_true")
+    p_links.add_argument("--delay", type=float, default=2.0)
+    p_links.add_argument("--timeout", type=float, default=30.0)
+    p_links.set_defaults(func=cmd_import_links)
+
+    p_collect = sub.add_parser(
+        "collect-hashtags",
+        help="Auto-collect hashtag posts via Firefox browser (no instaloader API).",
+    )
+    p_collect.add_argument("--hashtags-file", default="datasets/raw/hashtags.txt")
+    p_collect.add_argument("--pool-name", default="hashtags")
+    p_collect.add_argument("--max-count", type=int, default=30)
+    p_collect.add_argument("--require-face", action="store_true")
+    p_collect.add_argument("--delay", type=float, default=2.0)
+    p_collect.add_argument("--browser", default="firefox")
+    p_collect.add_argument(
+        "--headed",
+        action="store_true",
+        help="Show browser window (recommended first run).",
+    )
+    p_collect.add_argument("--scrolls", type=int, default=6)
+    p_collect.set_defaults(func=cmd_collect_hashtags)
 
     p_sess = sub.add_parser("scrape-session", help="Import Instagram session from browser cookies.")
     p_sess.add_argument("--user", required=True, help="Instagram username (e.g. sjjd6502).")

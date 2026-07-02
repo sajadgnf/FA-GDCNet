@@ -129,7 +129,9 @@ def _persist(
                 continue
             if require_face and not _image_has_face(image_path, min_size=min_face_size):
                 skipped_no_face += 1
-                log.debug("skip %s: no face detected", sc)
+                _remember_ignored(sc)
+                seen.add(sc)
+                log.debug("skip %s: no face detected (added to ignore list)", sc)
                 with suppress(OSError):
                     image_path.unlink()
                 continue
@@ -143,7 +145,11 @@ def _persist(
             written += 1
             time.sleep(delay)
     if require_face and skipped_no_face:
-        log.info("skipped %d posts with no detected face", skipped_no_face)
+        log.info(
+            "skipped %d posts with no detected face (IDs saved to %s)",
+            skipped_no_face,
+            IGNORED_IDS_FILE,
+        )
     if skipped_spam:
         log.info("skipped %d spam/bait captions (saved to %s)", skipped_spam, IGNORED_IDS_FILE)
     return written
@@ -152,7 +158,11 @@ def _persist(
 # ---------- Instaloader backend ----------------------------------------------
 
 
-def _build_instaloader():
+def _build_instaloader(
+    *,
+    max_connection_attempts: int = 2,
+    request_timeout: float = 45.0,
+):
     import instaloader
 
     return instaloader.Instaloader(
@@ -162,7 +172,53 @@ def _build_instaloader():
         save_metadata=False,
         compress_json=False,
         post_metadata_txt_pattern="",
+        max_connection_attempts=max_connection_attempts,
+        request_timeout=request_timeout,
     )
+
+
+def _is_ssl_or_network_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "ssl",
+            "unexpected_eof",
+            "connection aborted",
+            "connection reset",
+            "timed out",
+            "max retries exceeded",
+        )
+    )
+
+
+def _network_help_message() -> str:
+    return (
+        "Instagram API is unreachable from Python (SSL/timeout).\n"
+        "Firefox can work while instaloader fails when VPN/proxy is browser-only.\n"
+        "Try:\n"
+        "  1) Enable a system-wide VPN (not only a browser extension)\n"
+        "  2) Disable HTTPS scanning in antivirus / corporate proxy\n"
+        "  3) Set HTTPS_PROXY to your VPN proxy, then retry\n"
+        "  4) Refresh session: python tasks.py scrape-session --user YOUR_USER --browser firefox"
+    )
+
+
+def _verify_api_access(loader, session_user: str) -> None:
+    """Fail fast when Instagram API cannot be reached (avoids hours of per-profile retries)."""
+    import instaloader
+
+    handle = session_user.strip().lstrip("@")
+    if not handle:
+        return
+    try:
+        _resolve_profile(loader, handle)
+    except instaloader.exceptions.ProfileNotExistsException:
+        return
+    except instaloader.exceptions.ConnectionException as exc:
+        if _is_ssl_or_network_error(exc):
+            raise SystemExit(f"{_network_help_message()}\nDetails: {exc}") from exc
+        raise
 
 
 def _authenticate_instaloader(
@@ -278,15 +334,23 @@ def _login_loader(
     password: str | None = None,
     session_user: str | None = None,
     session_file: str | None = None,
+    max_connection_attempts: int = 2,
+    request_timeout: float = 45.0,
+    verify_api: bool = True,
 ):
-    loader = _build_instaloader()
-    _authenticate_instaloader(
+    loader = _build_instaloader(
+        max_connection_attempts=max_connection_attempts,
+        request_timeout=request_timeout,
+    )
+    user = _authenticate_instaloader(
         loader,
         username=username,
         password=password,
         session_user=session_user,
         session_file=session_file,
     )
+    if verify_api:
+        _verify_api_access(loader, user)
     return loader
 
 
@@ -318,12 +382,21 @@ def _iter_hashtag_posts(
     hashtag: str,
     loader,
 ) -> Iterator[ScrapedPost]:
+    """Yield photo posts from a public hashtag feed."""
     import instaloader
 
+    tag = hashtag.lstrip("#").strip().lower()
+    if not tag:
+        return
+
+    # Avoid Hashtag.from_name() — it always hits i.instagram.com/web_info first.
+    # get_posts_resumable() uses www.instagram.com GraphQL instead.
+    hashtag_obj = instaloader.Hashtag(loader.context, {"name": tag})
+
     try:
-        hashtag_obj = instaloader.Hashtag.from_name(loader.context, hashtag)
+        post_iter = hashtag_obj.get_posts_resumable()
     except instaloader.exceptions.QueryReturnedNotFoundException:
-        log.warning("skip hashtag %s: not found", hashtag)
+        log.warning("skip hashtag %s: not found", tag)
         return
     except instaloader.exceptions.ConnectionException as exc:
         if "login_required" in str(exc).lower():
@@ -331,15 +404,10 @@ def _iter_hashtag_posts(
                 "Instagram returned login_required. Use --username/--password or a saved session.\n"
                 "See README section 'Instagram scraping (login required)'."
             ) from exc
-        log.warning("skip hashtag %s: connection error (%s)", hashtag, exc)
+        log.warning("skip hashtag %s: connection error (%s)", tag, exc)
         return
 
-    log.info("scraping hashtag #%s", hashtag)
-    post_iter = (
-        hashtag_obj.get_posts_resumable()
-        if hasattr(hashtag_obj, "get_posts_resumable")
-        else hashtag_obj.get_posts()
-    )
+    log.info("scraping hashtag #%s (www graphql)", tag)
     for post in post_iter:
         if post.is_video:
             continue
@@ -353,14 +421,28 @@ def _iter_instaloader_posts(
     password: str | None = None,
     session_user: str | None = None,
     session_file: str | None = None,
+    max_connection_attempts: int = 2,
+    request_timeout: float = 45.0,
 ) -> Iterator[ScrapedPost]:
     loader = _login_loader(
         username=username,
         password=password,
         session_user=session_user,
         session_file=session_file,
+        max_connection_attempts=max_connection_attempts,
+        request_timeout=request_timeout,
+        verify_api=False,
     )
     yield from _iter_hashtag_posts(hashtag, loader)
+
+
+class ProfileNetworkError(ConnectionError):
+    """Raised when Instagram API cannot be reached for a profile lookup."""
+
+    def __init__(self, handle: str, cause: BaseException):
+        self.handle = handle
+        super().__init__(str(cause))
+        self.__cause__ = cause
 
 
 def _iter_profile_posts(
@@ -383,6 +465,8 @@ def _iter_profile_posts(
             raise SystemExit(
                 "Instagram returned login_required. Use --username/--password or a saved session."
             ) from exc
+        if _is_ssl_or_network_error(exc):
+            raise ProfileNetworkError(handle, exc) from exc
         log.warning("skip profile %s: connection error (%s)", handle, exc)
         return
 
@@ -579,6 +663,8 @@ def _iter_multi_hashtag_posts(
     session_user: str | None = None,
     session_file: str | None = None,
     hashtag_pause: float = 10.0,
+    max_connection_attempts: int = 2,
+    request_timeout: float = 45.0,
 ) -> Iterator[ScrapedPost]:
     """Yield photo posts from public hashtag feeds (any account worldwide)."""
     loader = _login_loader(
@@ -586,6 +672,9 @@ def _iter_multi_hashtag_posts(
         password=password,
         session_user=session_user,
         session_file=session_file,
+        max_connection_attempts=max_connection_attempts,
+        request_timeout=request_timeout,
+        verify_api=False,
     )
     for i, tag in enumerate(hashtags):
         if i:
@@ -602,22 +691,38 @@ def _iter_multi_profile_posts(
     session_file: str | None = None,
     posts_per_profile: int = 15,
     profile_pause: float = 6.0,
+    max_connection_attempts: int = 2,
+    request_timeout: float = 45.0,
+    max_profile_failures: int = 3,
 ) -> Iterator[ScrapedPost]:
     loader = _login_loader(
         username=username,
         password=password,
         session_user=session_user,
         session_file=session_file,
+        max_connection_attempts=max_connection_attempts,
+        request_timeout=request_timeout,
     )
+    failures = 0
     for i, name in enumerate(profile_names):
         if i:
             time.sleep(profile_pause)
-        yield from _iter_profile_posts(
-            name,
-            loader,
-            posts_per_profile=posts_per_profile,
-        )
-
+        try:
+            yield from _iter_profile_posts(
+                name,
+                loader,
+                posts_per_profile=posts_per_profile,
+            )
+            failures = 0
+        except ProfileNetworkError as exc:
+            failures += 1
+            log.warning("skip profile %s: network error (%s)", exc.handle, exc)
+            if failures >= max_profile_failures:
+                raise SystemExit(
+                    f"{_network_help_message()}\n"
+                    f"Stopped after {failures} consecutive profile failures.\n"
+                    f"Last error: {exc}"
+                ) from exc
 
 def _resolve_pool_name(args: argparse.Namespace) -> str:
     if args.pool_name:
@@ -718,6 +823,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--delay", type=float, default=DEFAULT_REQUEST_DELAY)
     parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=45.0,
+        help="Per-request timeout in seconds for Instagram API calls (default: 45).",
+    )
+    parser.add_argument(
+        "--max-connection-attempts",
+        type=int,
+        default=2,
+        help="Instaloader retries per API call (default: 2).",
+    )
+    parser.add_argument(
         "--require-face",
         action="store_true",
         help="Keep only images where OpenCV detects at least one frontal face.",
@@ -772,6 +889,8 @@ def main(argv: list[str] | None = None) -> int:
         "password": args.password,
         "session_user": args.session_user,
         "session_file": args.session_file,
+        "max_connection_attempts": args.max_connection_attempts,
+        "request_timeout": args.request_timeout,
     }
 
     if args.hashtag:
