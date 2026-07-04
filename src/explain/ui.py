@@ -16,7 +16,7 @@ from inference.smolvlm_check import is_smolvlm_pipeline, smolvlm_can_caption
 
 DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 EXPLAIN_DIR = Path("reports") / "explain"
-UI_BUILD = "2026-05-26-v13"
+UI_BUILD = "2026-07-04-v14"
 
 _RTL_PAGE_CSS = """
 <style>
@@ -99,6 +99,18 @@ def run_dashboard_app() -> None:
     )
     st.sidebar.caption(f"UI build {UI_BUILD}")
 
+    mode = st.sidebar.radio(
+        "Mode",
+        ["Analyze new post", "Browse labeled posts"],
+        index=0,
+    )
+
+    pipeline = _cached_pipeline()
+
+    if mode == "Analyze new post":
+        _render_new_post(pipeline)
+        return
+
     index = _dataset_index()
     if not index:
         st.warning(f"Labeled dataset not found at {DATASET}. Run scrape + label first.")
@@ -108,20 +120,95 @@ def run_dashboard_app() -> None:
     selected = st.sidebar.selectbox("post_id", post_ids)
     row = next(r for r in index if r["post_id"] == selected)
 
-    pipeline = _cached_pipeline()
+    _render_labeled_post(
+        pipeline,
+        caption=row["caption"],
+        image_path=row["image_path"],
+        gold_label=row["label"],
+        post_id=selected,
+    )
 
+
+def _render_new_post(pipeline: Pipeline) -> None:
     from PIL import Image
 
-    image = Image.open(row["image_path"]).convert("RGB")
-    features = pipeline.features_for(row["caption"], image)
+    st.markdown(
+        '<p dir="rtl" lang="fa" class="fa-rtl" style="text-align:right;">'
+        "یک تصویر و کپشن فارسی بارگذاری کنید تا مدل برچسب پیش‌بینی دهد."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    uploaded = st.file_uploader("Upload image", type=["jpg", "jpeg", "png", "webp"])
+    caption = st.text_area("Persian caption", height=120, placeholder="کپشن پست را اینجا بنویسید…")
+
+    if not uploaded or not caption.strip():
+        st.info("Upload an image and enter a caption to run prediction.")
+        return
+
+    image = Image.open(uploaded).convert("RGB")
+    if st.button("Predict", type="primary"):
+        with st.spinner("Running inference (SmolVLM + classifier)…"):
+            _render_prediction(
+                pipeline,
+                caption=caption.strip(),
+                image=image,
+                image_caption="(uploaded)",
+            )
+
+
+def _render_labeled_post(
+    pipeline: Pipeline,
+    *,
+    caption: str,
+    image_path: str,
+    gold_label: str,
+    post_id: str,
+) -> None:
+    from PIL import Image
+
+    image = Image.open(image_path).convert("RGB")
+    _render_prediction(
+        pipeline,
+        caption=caption,
+        image=image,
+        image_caption=image_path,
+        gold_label=gold_label,
+    )
+
+    st.divider()
+    st.markdown(
+        '<h3 dir="rtl" lang="fa" class="fa-rtl" style="text-align:right;">'
+        "توجه متنی (RTL)</h3>",
+        unsafe_allow_html=True,
+    )
+    tokens, scores = attention_from_text(pipeline.bundle, caption)
+    st.markdown(render_text_heatmap(tokens, scores, title=None), unsafe_allow_html=True)
+
+    st.subheader("Image attention overlay")
+    EXPLAIN_DIR.mkdir(parents=True, exist_ok=True)
+    grid = attention_from_image(pipeline.bundle, image)
+    overlay_path = overlay(image, grid, EXPLAIN_DIR / f"{post_id}.png")
+    st.image(str(overlay_path), use_container_width=True)
+
+
+def _render_prediction(
+    pipeline: Pipeline,
+    *,
+    caption: str,
+    image,
+    image_caption: str,
+    gold_label: str | None = None,
+) -> None:
+    features = pipeline.features_for(caption, image)
     prediction = pipeline.predict_from_features(features)
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.image(image, caption=row["image_path"], use_container_width=True)
+        st.image(image, caption=image_caption, use_container_width=True)
     with col_b:
-        st.markdown(_rtl_text_block(row["caption"], label="کپشن (فارسی)"), unsafe_allow_html=True)
-        st.markdown(f"**Gold label:** `{row['label']}`")
+        st.markdown(_rtl_text_block(caption, label="کپشن (فارسی)"), unsafe_allow_html=True)
+        if gold_label is not None:
+            st.markdown(f"**Gold label:** `{gold_label}`")
         st.markdown(f"**Predicted:** `{prediction.label}` ({prediction.confidence:.3f})")
         if prediction.low_fidelity:
             st.markdown(
@@ -133,18 +220,3 @@ def run_dashboard_app() -> None:
                 unsafe_allow_html=True,
             )
         st.json(prediction.discrepancy_vector)
-
-    st.divider()
-    st.markdown(
-        '<h3 dir="rtl" lang="fa" class="fa-rtl" style="text-align:right;">'
-        "توجه متنی (RTL)</h3>",
-        unsafe_allow_html=True,
-    )
-    tokens, scores = attention_from_text(pipeline.bundle, row["caption"])
-    st.markdown(render_text_heatmap(tokens, scores, title=None), unsafe_allow_html=True)
-
-    st.subheader("Image attention overlay")
-    EXPLAIN_DIR.mkdir(parents=True, exist_ok=True)
-    grid = attention_from_image(pipeline.bundle, image)
-    overlay_path = overlay(image, grid, EXPLAIN_DIR / f"{selected}.png")
-    st.image(str(overlay_path), use_container_width=True)

@@ -155,6 +155,8 @@ def cmd_import_links(args: argparse.Namespace) -> int:
         extra += ["--pool-name", args.pool_name]
     if getattr(args, "require_face", False):
         extra.append("--require-face")
+    if getattr(args, "sarcasm_candidates", False):
+        extra.append("--sarcasm-candidates")
     if getattr(args, "delay", None) is not None:
         extra += ["--delay", str(args.delay)]
     if getattr(args, "timeout", None) is not None:
@@ -169,12 +171,16 @@ def cmd_collect_hashtags(args: argparse.Namespace) -> int:
     extra += ["--max-count", str(args.max_count)]
     if getattr(args, "require_face", False):
         extra.append("--require-face")
+    if getattr(args, "sarcasm_candidates", False):
+        extra.append("--sarcasm-candidates")
     if getattr(args, "delay", None) is not None:
         extra += ["--delay", str(args.delay)]
     if getattr(args, "headed", False):
         extra.append("--headed")
     if getattr(args, "scrolls", None) is not None:
         extra += ["--scrolls", str(args.scrolls)]
+    if getattr(args, "page_timeout", None) is not None:
+        extra += ["--page-timeout", str(args.page_timeout)]
     if getattr(args, "browser", None):
         extra += ["--browser", args.browser]
     return _run("data.collect_browser", *extra)
@@ -331,6 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_links.add_argument("--pool-name", default="hashtags")
     p_links.add_argument("--require-face", action="store_true")
+    p_links.add_argument("--sarcasm-candidates", action="store_true")
     p_links.add_argument("--delay", type=float, default=2.0)
     p_links.add_argument("--timeout", type=float, default=30.0)
     p_links.set_defaults(func=cmd_import_links)
@@ -343,7 +350,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_collect.add_argument("--pool-name", default="hashtags")
     p_collect.add_argument("--max-count", type=int, default=30)
     p_collect.add_argument("--require-face", action="store_true")
-    p_collect.add_argument("--delay", type=float, default=2.0)
+    p_collect.add_argument(
+        "--sarcasm-candidates",
+        action="store_true",
+        help="Skip plain selfie captions; keep posts with irony/sarcasm text cues.",
+    )
+    p_collect.add_argument("--delay", type=float, default=4.0)
     p_collect.add_argument("--browser", default="firefox")
     p_collect.add_argument(
         "--headed",
@@ -351,6 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show browser window (recommended first run).",
     )
     p_collect.add_argument("--scrolls", type=int, default=6)
+    p_collect.add_argument("--page-timeout", type=int, default=120)
     p_collect.set_defaults(func=cmd_collect_hashtags)
 
     p_sess = sub.add_parser("scrape-session", help="Import Instagram session from browser cookies.")

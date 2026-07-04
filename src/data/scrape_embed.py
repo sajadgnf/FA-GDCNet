@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .preprocess import is_persian_enough, is_spam_caption, preprocess_caption
+from .sarcasm_candidates import is_sarcasm_candidate_caption
 from .scrape import (
     DEFAULT_RAW_DIR,
     IGNORED_IDS_FILE,
@@ -152,21 +153,35 @@ def fetch_post_via_browser(
     shortcode: str,
     *,
     kind: str = "p",
-    timeout_ms: int = 60000,
+    timeout_ms: int = 120_000,
 ) -> tuple[str, str]:
     """Return (caption, image_url) using a logged-in Playwright page."""
     url = f"https://www.instagram.com/{kind}/{shortcode}/"
     nav_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            nav_error = None
+    for attempt in range(5):
+        for wait_until in ("commit", "domcontentloaded"):
+            try:
+                page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+                nav_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                nav_error = exc
+                log.debug(
+                    "goto %s wait=%s attempt %d failed: %s",
+                    shortcode,
+                    wait_until,
+                    attempt + 1,
+                    exc,
+                )
+        if nav_error is None:
             break
-        except Exception as exc:  # noqa: BLE001 — playwright navigation errors vary
-            nav_error = exc
-            if attempt < 2:
-                log.debug("retry navigation for %s (%s)", shortcode, exc)
-                time.sleep(2 + attempt)
+        err = str(nav_error)
+        if any(x in err for x in ("NET_EMPTY", "NET_TIMEOUT", "ABORTED", "TIMED_OUT")):
+            try:
+                page.goto("https://www.instagram.com/", wait_until="commit", timeout=timeout_ms)
+            except Exception:
+                pass
+            time.sleep(5 + attempt * 3)
     if nav_error is not None:
         raise RuntimeError(f"browser navigation failed for {shortcode}: {nav_error}") from nav_error
 
@@ -256,6 +271,7 @@ def import_shortcodes(
     max_count: int | None = None,
     page: Page | None = None,
     browser_context: BrowserContext | None = None,
+    sarcasm_candidates: bool = False,
 ) -> int:
     if require_face:
         try:
@@ -279,6 +295,9 @@ def import_shortcodes(
 
     written = 0
     skipped_no_face = 0
+    skipped_not_sarcasm = 0
+    consecutive_fetch_failures = 0
+    post_timeout_ms = max(int(timeout * 1000), 120_000)
     with jsonl_path.open("a", encoding="utf-8") as out:
         for i, ref in enumerate(refs):
             shortcode = ref.shortcode
@@ -295,13 +314,30 @@ def import_shortcodes(
                         page,
                         shortcode,
                         kind=ref.kind,
-                        timeout_ms=int(timeout * 1000),
+                        timeout_ms=post_timeout_ms,
                     )
                 else:
                     caption_raw, image_url = fetch_embed_post(shortcode, timeout=timeout)
             except Exception as exc:  # noqa: BLE001 — playwright/network errors vary
+                consecutive_fetch_failures += 1
                 log.warning("skip %s: fetch failed (%s)", shortcode, exc)
+                if consecutive_fetch_failures >= 3:
+                    pause = min(30, 10 * consecutive_fetch_failures)
+                    log.warning(
+                        "Pausing %ds after %d consecutive fetch failures (VPN/rate limit?)",
+                        pause,
+                        consecutive_fetch_failures,
+                    )
+                    time.sleep(pause)
+                if consecutive_fetch_failures >= 8:
+                    log.error(
+                        "Stopping import after %d consecutive failures — check VPN, wait, retry with --delay 5",
+                        consecutive_fetch_failures,
+                    )
+                    break
+                time.sleep(delay)
                 continue
+            consecutive_fetch_failures = 0
 
             caption = preprocess_caption(caption_raw)
             if caption and not is_persian_enough(caption):
@@ -310,6 +346,10 @@ def import_shortcodes(
             if caption and is_spam_caption(caption):
                 _remember_ignored(shortcode)
                 seen.add(shortcode)
+                continue
+            if sarcasm_candidates and caption and not is_sarcasm_candidate_caption(caption):
+                skipped_not_sarcasm += 1
+                log.debug("skip %s: caption lacks sarcasm/irony cues", shortcode)
                 continue
 
             ext = ".webp" if ".webp" in image_url.split("?")[0].lower() else ".jpg"
@@ -348,6 +388,8 @@ def import_shortcodes(
             skipped_no_face,
             IGNORED_IDS_FILE,
         )
+    if skipped_not_sarcasm:
+        log.info("skipped %d posts with no sarcasm cues in caption (plain selfies)", skipped_not_sarcasm)
     log.info("imported %d posts into %s", written, jsonl_path)
     return written
 
@@ -362,6 +404,7 @@ def import_from_links(
     delay: float = 2.0,
     timeout: float = 30.0,
     max_count: int | None = None,
+    sarcasm_candidates: bool = False,
 ) -> int:
     if not links_path.is_file():
         raise SystemExit(f"links file not found: {links_path}")
@@ -379,6 +422,7 @@ def import_from_links(
         delay=delay,
         timeout=timeout,
         max_count=max_count,
+        sarcasm_candidates=sarcasm_candidates,
     )
 
 
@@ -390,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pool-name", default="hashtags")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_RAW_DIR)
     parser.add_argument("--require-face", action="store_true")
+    parser.add_argument("--sarcasm-candidates", action="store_true")
     parser.add_argument("--min-face-size", type=int, default=40)
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=30.0)
@@ -403,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         min_face_size=args.min_face_size,
         delay=args.delay,
         timeout=args.timeout,
+        sarcasm_candidates=args.sarcasm_candidates,
     )
     return 0
 

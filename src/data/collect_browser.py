@@ -98,13 +98,35 @@ def _playwright_cookies(browser: str = "firefox") -> list[dict]:
     return out
 
 
+def _goto_with_retry(
+    page,
+    url: str,
+    *,
+    page_timeout_ms: int = 120_000,
+    attempts: int = 3,
+) -> None:
+    """Navigate with retries; Instagram often needs commit, not full domcontentloaded."""
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        for wait_until in ("commit", "domcontentloaded"):
+            try:
+                page.goto(url, wait_until=wait_until, timeout=page_timeout_ms)
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                log.debug("goto %s wait=%s attempt %d failed: %s", url, wait_until, attempt + 1, exc)
+        if attempt < attempts - 1:
+            time.sleep(3 + attempt * 2)
+    raise RuntimeError(f"navigation failed for {url}: {last_exc}") from last_exc
+
+
 def _scroll_hashtag_page(
     page,
     tag: str,
     *,
     scrolls: int = 6,
     scroll_pause: float = 2.5,
-    page_timeout_ms: int = 60000,
+    page_timeout_ms: int = 120_000,
 ) -> list[PostRef]:
     tag = tag.lstrip("#").strip().lower()
     url = f"https://www.instagram.com/explore/tags/{tag}/"
@@ -112,7 +134,7 @@ def _scroll_hashtag_page(
     seen: set[str] = set()
 
     log.info("opening #%s (%s)", tag, url)
-    page.goto(url, wait_until="domcontentloaded", timeout=page_timeout_ms)
+    _goto_with_retry(page, url, page_timeout_ms=page_timeout_ms)
     time.sleep(scroll_pause)
 
     for scroll in range(scrolls):
@@ -195,6 +217,8 @@ def collect_hashtags_from_file(
     headed: bool = False,
     scrolls: int = 6,
     scroll_pause: float = 2.5,
+    page_timeout_ms: int = 120_000,
+    sarcasm_candidates: bool = False,
 ) -> int:
     tags = _load_hashtags(hashtags_file)
     if not tags:
@@ -224,9 +248,24 @@ def collect_hashtags_from_file(
         )
         context.add_cookies(_playwright_cookies(browser))
         page = context.new_page()
+        try:
+            log.info("warming up instagram.com …")
+            _goto_with_retry(page, "https://www.instagram.com/", page_timeout_ms=page_timeout_ms)
+            time.sleep(scroll_pause)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("instagram warm-up failed (%s) — continuing anyway", exc)
 
+        consecutive_failures = 0
         for i, tag in enumerate(tags):
             if len(candidates) >= max_count * 3:
+                break
+            if consecutive_failures >= 5:
+                log.error(
+                    "Stopped after %d consecutive hashtag timeouts. "
+                    "Check VPN, log into Instagram in %s, wait a few minutes, retry.",
+                    consecutive_failures,
+                    browser,
+                )
                 break
             if i:
                 time.sleep(scroll_pause)
@@ -236,10 +275,14 @@ def collect_hashtags_from_file(
                     tag,
                     scrolls=scrolls,
                     scroll_pause=scroll_pause,
+                    page_timeout_ms=page_timeout_ms,
                 )
             except Exception as exc:  # noqa: BLE001
+                consecutive_failures += 1
                 log.warning("skip hashtag %s: browser collection failed (%s)", tag, exc)
+                time.sleep(scroll_pause * 2)
                 continue
+            consecutive_failures = 0
             for ref in found:
                 if ref.shortcode in blocked or ref.shortcode in seen_candidates:
                     continue
@@ -251,8 +294,9 @@ def collect_hashtags_from_file(
             context.close()
             launch.close()
             raise SystemExit(
-                "Browser found no new post links. Try --headed, log in to Instagram in "
-                f"{browser}, or increase --scrolls."
+                "Browser found no new post links. If every hashtag timed out, check VPN / "
+                f"Firefox login and retry with --page-timeout 180. Otherwise try --headed or "
+                "increase --scrolls."
             )
 
         written = import_shortcodes(
@@ -266,6 +310,7 @@ def collect_hashtags_from_file(
             max_count=max_count,
             page=page,
             browser_context=context,
+            sarcasm_candidates=sarcasm_candidates,
         )
 
         context.close()
@@ -294,6 +339,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--scrolls", type=int, default=6)
     parser.add_argument("--scroll-pause", type=float, default=2.5)
+    parser.add_argument(
+        "--page-timeout",
+        type=int,
+        default=120,
+        help="Navigation timeout per page in seconds (default 120).",
+    )
+    parser.add_argument(
+        "--sarcasm-candidates",
+        action="store_true",
+        help="Skip captions with no irony/sarcasm text cues (plain selfies).",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     collect_hashtags_from_file(
@@ -309,6 +365,8 @@ def main(argv: list[str] | None = None) -> int:
         headed=args.headed,
         scrolls=args.scrolls,
         scroll_pause=args.scroll_pause,
+        page_timeout_ms=args.page_timeout * 1000,
+        sarcasm_candidates=args.sarcasm_candidates,
     )
     return 0
 
