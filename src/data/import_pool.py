@@ -107,7 +107,7 @@ def import_local_pool(
         _image_has_face = None  # type: ignore[assignment,misc]
 
     jsonl_path = out_dir / f"{pool_name}.jsonl"
-    image_dir = out_dir / pool_name
+    image_dir = out_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
     seen = _existing_shortcodes(jsonl_path)
 

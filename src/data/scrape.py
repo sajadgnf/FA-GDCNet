@@ -21,6 +21,7 @@ import logging
 import os
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Protocol
 
@@ -644,15 +645,42 @@ def _load_profile_names(path: Path) -> list[str]:
     return names
 
 
-def _load_hashtags(path: Path) -> list[str]:
-    tags: list[str] = []
+@dataclass(frozen=True)
+class HashtagSpec:
+    term: str
+    search: bool = False
+
+
+def _load_hashtag_specs(path: Path, *, search_all: bool = False) -> list[HashtagSpec]:
+    """Load hashtag lines from a text file.
+
+    Comments are whole lines starting with ``#`` (ASCII hash at column 0).
+
+    Search (partial match) when:
+    - ``--hashtag-contains`` / ``search_all=True``, or
+    - the line starts with ``?``, ``*``, or ``~`` (e.g. ``?کنایه``).
+
+    Otherwise the line is treated as an exact tag name.
+    """
+    specs: list[HashtagSpec] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             raw = line.strip()
             if not raw or raw.startswith("#"):
                 continue
-            tags.append(raw.lstrip("#"))
-    return tags
+            search = search_all
+            term = raw
+            if raw[0] in "?*~":
+                search = True
+                term = raw[1:].strip()
+            term = term.lstrip("#").strip()
+            if term:
+                specs.append(HashtagSpec(term=term, search=search))
+    return specs
+
+
+def _load_hashtags(path: Path, *, search_all: bool = False) -> list[str]:
+    return [spec.term for spec in _load_hashtag_specs(path, search_all=search_all)]
 
 
 def _iter_multi_hashtag_posts(
@@ -882,7 +910,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pool = _resolve_pool_name(args)
     jsonl_path = args.out_dir / f"{pool}.jsonl"
-    image_dir = args.out_dir / pool
+    image_dir = args.out_dir / "images"
 
     auth = {
         "username": args.username,

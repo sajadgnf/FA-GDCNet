@@ -183,6 +183,10 @@ def cmd_collect_hashtags(args: argparse.Namespace) -> int:
         extra += ["--page-timeout", str(args.page_timeout)]
     if getattr(args, "browser", None):
         extra += ["--browser", args.browser]
+    if getattr(args, "hashtag_contains", False):
+        extra.append("--hashtag-contains")
+    if getattr(args, "max_search_tags", None) is not None:
+        extra += ["--max-search-tags", str(args.max_search_tags)]
     return _run("data.collect_browser", *extra)
 
 
@@ -355,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip plain selfie captions; keep posts with irony/sarcasm text cues.",
     )
-    p_collect.add_argument("--delay", type=float, default=4.0)
+    p_collect.add_argument("--delay", type=float, default=8.0)
     p_collect.add_argument("--browser", default="firefox")
     p_collect.add_argument(
         "--headed",
@@ -364,6 +368,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_collect.add_argument("--scrolls", type=int, default=6)
     p_collect.add_argument("--page-timeout", type=int, default=120)
+    p_collect.add_argument(
+        "--hashtag-contains",
+        action="store_true",
+        help="Search tags whose name includes each line (partial match), not exact tag only.",
+    )
+    p_collect.add_argument(
+        "--max-search-tags",
+        type=int,
+        default=15,
+        help="Max tags per search term when using --hashtag-contains or ?prefix (default 15).",
+    )
     p_collect.set_defaults(func=cmd_collect_hashtags)
 
     p_sess = sub.add_parser("scrape-session", help="Import Instagram session from browser cookies.")

@@ -21,9 +21,12 @@ import argparse
 import logging
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
-from .scrape import DEFAULT_RAW_DIR, _existing_shortcodes, _load_hashtags
+from collections.abc import Callable
+
+from .scrape import DEFAULT_RAW_DIR, HashtagSpec, _existing_shortcodes, _load_hashtag_specs
 from .scrape_embed import PostRef, import_shortcodes
 
 log = logging.getLogger(__name__)
@@ -127,6 +130,8 @@ def _scroll_hashtag_page(
     scrolls: int = 6,
     scroll_pause: float = 2.5,
     page_timeout_ms: int = 120_000,
+    blocked: set[str] | None = None,
+    on_batch: Callable[[list[PostRef], str], None] | None = None,
 ) -> list[PostRef]:
     tag = tag.lstrip("#").strip().lower()
     url = f"https://www.instagram.com/explore/tags/{tag}/"
@@ -148,17 +153,152 @@ def _scroll_hashtag_page(
                 return out;
             }"""
         )
+        batch_new: list[PostRef] = []
         for item in refs:
             sc = str(item.get("shortcode", ""))
             kind = str(item.get("kind", "p"))
             if sc and sc not in seen:
                 seen.add(sc)
-                found.append(PostRef(shortcode=sc, kind=kind))
-        log.info("#%s scroll %d/%d: %d links", tag, scroll + 1, scrolls, len(found))
+                ref = PostRef(shortcode=sc, kind=kind)
+                found.append(ref)
+                if blocked is None or sc not in blocked:
+                    batch_new.append(ref)
+        log.info("#%s scroll %d/%d: %d links (%d new this batch)", tag, scroll + 1, scrolls, len(found), len(batch_new))
+        if on_batch and batch_new:
+            on_batch(batch_new, url)
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(scroll_pause)
 
     return found
+
+
+def _scroll_hashtag_and_import(
+    page,
+    tag: str,
+    *,
+    scrolls: int = 6,
+    scroll_pause: float = 2.5,
+    page_timeout_ms: int = 120_000,
+    blocked: set[str],
+    seen_candidates: set[str],
+    pending_refs: list[PostRef],
+    import_fn: Callable[[list[PostRef], str], int],
+) -> tuple[list[PostRef], int]:
+    """Scroll a hashtag page and import each batch while posts are still in the DOM."""
+    imported = 0
+
+    def on_batch(batch: list[PostRef], tag_url: str) -> None:
+        nonlocal imported
+        fresh = [
+            ref
+            for ref in batch
+            if ref.shortcode not in blocked
+            and ref.shortcode not in seen_candidates
+        ]
+        if not fresh:
+            return
+        for ref in fresh:
+            seen_candidates.add(ref.shortcode)
+            pending_refs.append(ref)
+        n = import_fn(fresh, tag_url)
+        imported += n
+
+    found = _scroll_hashtag_page(
+        page,
+        tag,
+        scrolls=scrolls,
+        scroll_pause=scroll_pause,
+        page_timeout_ms=page_timeout_ms,
+        blocked=blocked,
+        on_batch=on_batch,
+    )
+    return found, imported
+
+
+def _search_hashtags_containing(
+    page,
+    query: str,
+    *,
+    max_tags: int = 15,
+    page_timeout_ms: int = 120_000,
+    scroll_pause: float = 2.5,
+) -> list[str]:
+    """Find Instagram tags whose name includes ``query`` (partial match)."""
+    term = query.lstrip("#").strip()
+    if not term:
+        return []
+    url = (
+        "https://www.instagram.com/explore/search/keyword/?q="
+        + urllib.parse.quote(term)
+    )
+    log.info("searching tags containing %r …", term)
+    _goto_with_retry(page, url, page_timeout_ms=page_timeout_ms)
+    time.sleep(scroll_pause)
+    try:
+        page.locator('a[href*="/explore/tags/"]').first.wait_for(
+            state="attached",
+            timeout=min(15_000, page_timeout_ms // 2),
+        )
+    except Exception:
+        log.debug("no tag links visible yet for search %r", term)
+    for _ in range(3):
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(0.8)
+    needle = term.lower()
+    tags: list[str] = page.evaluate(
+        """(needle) => {
+            const out = [];
+            for (const a of document.querySelectorAll('a[href*="/explore/tags/"]')) {
+                const m = a.href.match(/\\/explore\\/tags\\/([^/?#]+)/);
+                if (!m) continue;
+                const tag = decodeURIComponent(m[1]);
+                if (tag.toLowerCase().includes(needle)) out.push(tag);
+            }
+            return [...new Set(out)];
+        }""",
+        needle,
+    )
+    if len(tags) > max_tags:
+        tags = tags[:max_tags]
+    return tags
+
+
+def _resolve_hashtags(
+    page,
+    specs: list[HashtagSpec],
+    *,
+    max_search_tags: int = 15,
+    page_timeout_ms: int = 120_000,
+    scroll_pause: float = 2.5,
+) -> list[str]:
+    """Expand search specs to concrete tag names; keep exact specs as-is."""
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for spec in specs:
+        if spec.search:
+            found = _search_hashtags_containing(
+                page,
+                spec.term,
+                max_tags=max_search_tags,
+                page_timeout_ms=page_timeout_ms,
+                scroll_pause=scroll_pause,
+            )
+            if not found:
+                log.warning("no tags containing %r on Instagram — trying exact #%s", spec.term, spec.term)
+                found = [spec.term]
+            else:
+                preview = ", ".join(f"#{t}" for t in found[:6])
+                if len(found) > 6:
+                    preview += f", … (+{len(found) - 6} more)"
+                log.info("search %r → %d tags: %s", spec.term, len(found), preview)
+        else:
+            found = [spec.term]
+        for tag in found:
+            key = tag.lower()
+            if key not in seen:
+                seen.add(key)
+                resolved.append(tag)
+    return resolved
 
 
 def collect_shortcodes_from_hashtag(
@@ -219,9 +359,11 @@ def collect_hashtags_from_file(
     scroll_pause: float = 2.5,
     page_timeout_ms: int = 120_000,
     sarcasm_candidates: bool = False,
+    hashtag_contains: bool = False,
+    max_search_tags: int = 15,
 ) -> int:
-    tags = _load_hashtags(hashtags_file)
-    if not tags:
+    specs = _load_hashtag_specs(hashtags_file, search_all=hashtag_contains)
+    if not specs:
         raise SystemExit(f"No hashtags in {hashtags_file}")
 
     try:
@@ -234,8 +376,13 @@ def collect_hashtags_from_file(
 
     jsonl_path = out_dir / f"{pool_name}.jsonl"
     blocked = _existing_shortcodes(jsonl_path)
-    candidates: list[PostRef] = []
+    log.info(
+        "%d post IDs already in pool/ignore list — only unseen hashtag links will be collected",
+        len(blocked),
+    )
     seen_candidates: set[str] = set()
+    pending_refs: list[PostRef] = []
+    written_total = 0
 
     with sync_playwright() as pw:
         launch = pw.firefox.launch(headless=not headed)
@@ -255,9 +402,44 @@ def collect_hashtags_from_file(
         except Exception as exc:  # noqa: BLE001
             log.warning("instagram warm-up failed (%s) — continuing anyway", exc)
 
+        tags = _resolve_hashtags(
+            page,
+            specs,
+            max_search_tags=max_search_tags,
+            page_timeout_ms=page_timeout_ms,
+            scroll_pause=scroll_pause,
+        )
+        if not tags:
+            context.close()
+            launch.close()
+            raise SystemExit(f"No hashtags resolved from {hashtags_file}")
+
         consecutive_failures = 0
+
+        def import_batch(refs: list[PostRef], tag_url: str) -> int:
+            nonlocal written_total
+            if written_total >= max_count:
+                return 0
+            return import_shortcodes(
+                refs,
+                pool_name=pool_name,
+                out_dir=out_dir,
+                require_face=require_face,
+                min_face_size=min_face_size,
+                delay=delay,
+                timeout=timeout,
+                max_count=max_count - written_total,
+                page=page,
+                browser_context=context,
+                sarcasm_candidates=sarcasm_candidates,
+                prefer_modal=True,
+                hashtag_url=tag_url,
+            )
+
         for i, tag in enumerate(tags):
-            if len(candidates) >= max_count * 3:
+            if written_total >= max_count:
+                break
+            if len(seen_candidates) >= max_count * 3:
                 break
             if consecutive_failures >= 5:
                 log.error(
@@ -270,12 +452,16 @@ def collect_hashtags_from_file(
             if i:
                 time.sleep(scroll_pause)
             try:
-                found = _scroll_hashtag_page(
+                found, written = _scroll_hashtag_and_import(
                     page,
                     tag,
                     scrolls=scrolls,
                     scroll_pause=scroll_pause,
                     page_timeout_ms=page_timeout_ms,
+                    blocked=blocked,
+                    seen_candidates=seen_candidates,
+                    pending_refs=pending_refs,
+                    import_fn=import_batch,
                 )
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures += 1
@@ -283,14 +469,29 @@ def collect_hashtags_from_file(
                 time.sleep(scroll_pause * 2)
                 continue
             consecutive_failures = 0
-            for ref in found:
-                if ref.shortcode in blocked or ref.shortcode in seen_candidates:
-                    continue
-                seen_candidates.add(ref.shortcode)
-                candidates.append(ref)
-            log.info("#%s yielded %d new candidates (%d total)", tag, len(found), len(candidates))
+            written_total += written
+            log.info(
+                "#%s done: %d links seen, %d imported this tag (%d total)",
+                tag,
+                len(found),
+                written,
+                written_total,
+            )
+            if written_total >= max_count:
+                break
 
-        if not candidates:
+        if written_total == 0 and pending_refs:
+            pending_path = out_dir / f"{pool_name}_pending_links.txt"
+            with pending_path.open("a", encoding="utf-8") as pf:
+                for ref in pending_refs:
+                    pf.write(f"https://www.instagram.com/{ref.kind}/{ref.shortcode}/\n")
+            log.info(
+                "Saved %d post links to %s — retry later with import-links",
+                len(pending_refs),
+                pending_path,
+            )
+
+        if written_total == 0 and not pending_refs:
             context.close()
             launch.close()
             raise SystemExit(
@@ -299,24 +500,10 @@ def collect_hashtags_from_file(
                 "increase --scrolls."
             )
 
-        written = import_shortcodes(
-            candidates,
-            pool_name=pool_name,
-            out_dir=out_dir,
-            require_face=require_face,
-            min_face_size=min_face_size,
-            delay=delay,
-            timeout=timeout,
-            max_count=max_count,
-            page=page,
-            browser_context=context,
-            sarcasm_candidates=sarcasm_candidates,
-        )
-
         context.close()
         launch.close()
 
-    return written
+    return written_total
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -329,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-count", type=int, default=30)
     parser.add_argument("--require-face", action="store_true")
     parser.add_argument("--min-face-size", type=int, default=40)
-    parser.add_argument("--delay", type=float, default=2.0)
+    parser.add_argument("--delay", type=float, default=8.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--browser", default="firefox")
     parser.add_argument(
@@ -350,6 +537,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip captions with no irony/sarcasm text cues (plain selfies).",
     )
+    parser.add_argument(
+        "--hashtag-contains",
+        action="store_true",
+        help="Treat every line as a search term (tags whose name includes it), not exact tag.",
+    )
+    parser.add_argument(
+        "--max-search-tags",
+        type=int,
+        default=15,
+        help="Max tags to collect per search term (default 15).",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     collect_hashtags_from_file(
@@ -367,6 +565,8 @@ def main(argv: list[str] | None = None) -> int:
         scroll_pause=args.scroll_pause,
         page_timeout_ms=args.page_timeout * 1000,
         sarcasm_candidates=args.sarcasm_candidates,
+        hashtag_contains=args.hashtag_contains,
+        max_search_tags=args.max_search_tags,
     )
     return 0
 

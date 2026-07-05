@@ -49,6 +49,72 @@ _OG_DESC_CAPTION_RE = re.compile(
     r':\s*["\u201c](.+?)["\u201d]\s*$',
     re.S,
 )
+_OG_DESC_META_RE = re.compile(
+    r'<meta\s+property="og:description"\s+content="([^"]*)"',
+    re.I,
+)
+_OG_IMAGE_META_RE = re.compile(
+    r'<meta\s+property="og:image"\s+content="([^"]*)"',
+    re.I,
+)
+_FETCH_HTML_JS = """async ([url, timeoutMs]) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const resp = await fetch(url, { signal: ctrl.signal, credentials: 'include' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return await resp.text();
+    } finally {
+        clearTimeout(timer);
+    }
+}"""
+_MODAL_EXTRACT_JS = """() => {
+    const root = document.querySelector('div[role="dialog"]')
+        || document.querySelector('article[role="presentation"]')
+        || document.querySelector('article');
+    if (!root) return null;
+    const images = [...root.querySelectorAll('img')]
+        .map((img) => img.src)
+        .filter((src) => src && (src.includes('scontent') || src.includes('cdninstagram'))
+            && !src.includes('s150x150') && !src.includes('s100x100'));
+    const ogDesc = document.querySelector('meta[property="og:description"]')?.content || null;
+    const skip = /^(like|likes|comment|comments|share|save|follow|more|بیشتر|پسند|نظر|اشتراک|ذخیره|دنبال)$/i;
+    let caption = '';
+    const h1 = root.querySelector('h1');
+    if (h1?.innerText?.trim()) caption = h1.innerText.trim();
+    for (const el of root.querySelectorAll('h1, h2, span[dir="auto"], div[dir="auto"]')) {
+        const text = (el.innerText || '').trim();
+        if (!text || text.length < 4 || skip.test(text)) continue;
+        if (text.length > caption.length) caption = text;
+    }
+    return { images, ogDesc, caption };
+}"""
+_CAPTION_JSON_JS = """() => {
+    function walk(obj, depth) {
+        if (!obj || depth > 16) return '';
+        if (typeof obj !== 'object') return '';
+        const edges = obj.edge_media_to_caption?.edges;
+        if (Array.isArray(edges) && edges[0]?.node?.text) return edges[0].node.text;
+        if (typeof obj.caption?.text === 'string' && obj.caption.text.length > 3)
+            return obj.caption.text;
+        if (typeof obj.text === 'string' && obj.text.length > 8) {
+            const t = obj.__typename || '';
+            if (t.includes('Caption') || t.includes('Comment')) return obj.text;
+        }
+        for (const v of Object.values(obj)) {
+            const found = walk(v, depth + 1);
+            if (found) return found;
+        }
+        return '';
+    }
+    for (const s of document.querySelectorAll('script[type="application/json"]')) {
+        try {
+            const found = walk(JSON.parse(s.textContent), 0);
+            if (found) return found;
+        } catch (_) {}
+    }
+    return '';
+}"""
 _POST_EXTRACT_JS = """() => {
     const ogImage = document.querySelector('meta[property="og:image"]')?.content || null;
     const ogDesc = document.querySelector('meta[property="og:description"]')?.content || null;
@@ -148,17 +214,246 @@ def _pick_image_url_from_browser(data: dict[str, Any]) -> str | None:
     return _pick_image_url(urls)
 
 
-def fetch_post_via_browser(
+def _embed_url(shortcode: str, kind: str = "p") -> str:
+    return f"https://www.instagram.com/{kind}/{shortcode}/embed/captioned/"
+
+
+def _parse_caption_from_html(html: str) -> str:
+    caption = _extract_caption(html)
+    if not caption:
+        m = _OG_DESC_META_RE.search(html)
+        if m:
+            caption = _caption_from_og_description(html_mod.unescape(m.group(1)))
+    return caption
+
+
+def _parse_post_html(html: str) -> tuple[str, str]:
+    image_url = _pick_image_url_from_html(html)
+    if not image_url:
+        m = _OG_IMAGE_META_RE.search(html)
+        if m:
+            image_url = html_mod.unescape(m.group(1))
+    if not image_url:
+        raise RuntimeError("no image in html")
+    caption = _parse_caption_from_html(html)
+    return caption, image_url
+
+
+def _caption_from_modal_data(data: dict[str, Any]) -> str:
+    caption = str(data.get("caption") or "").strip()
+    if not caption:
+        caption = _caption_from_og_description(str(data.get("ogDesc") or ""))
+    return caption
+
+
+def _expand_modal_caption(page: Page) -> None:
+    """Click Instagram's 'more' / 'بیشتر' to reveal full caption text."""
+    for pattern in ("more", "بیشتر", "…"):
+        try:
+            btn = page.locator('div[role="dialog"] button, div[role="dialog"] span[role="button"]').filter(
+                has_text=re.compile(pattern, re.I)
+            ).first
+            if btn.count():
+                btn.click(timeout=1500)
+                time.sleep(0.4)
+        except Exception:
+            pass
+
+
+def _extract_caption_from_page(page: Page) -> str:
+    caption = page.evaluate(_CAPTION_JSON_JS)
+    if isinstance(caption, str) and caption.strip():
+        return caption.strip()
+    data = page.evaluate(_MODAL_EXTRACT_JS)
+    if isinstance(data, dict):
+        return _caption_from_modal_data(data)
+    return ""
+
+
+def _try_fetch_caption_only(
+    page: Page,
+    shortcode: str,
+    *,
+    kind: str = "p",
+    timeout_ms: int = 120_000,
+) -> str:
+    """Fetch caption without navigating away (rate-limit friendly)."""
+    caption = _extract_caption_from_page(page)
+    if caption:
+        return caption
+    try:
+        html = _fetch_html_inpage(page, _embed_url(shortcode, kind), timeout_ms=timeout_ms)
+        caption = _parse_caption_from_html(html)
+        if caption:
+            return caption
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_html_inpage(page: Page, url: str, *, timeout_ms: int) -> str:
+    html = page.evaluate(_FETCH_HTML_JS, [url, timeout_ms])
+    if not isinstance(html, str) or not html.strip():
+        raise RuntimeError(f"empty in-page fetch for {url}")
+    return html
+
+
+def _fetch_post_embed_inpage(
     page: Page,
     shortcode: str,
     *,
     kind: str = "p",
     timeout_ms: int = 120_000,
 ) -> tuple[str, str]:
-    """Return (caption, image_url) using a logged-in Playwright page."""
+    html = _fetch_html_inpage(page, _embed_url(shortcode, kind), timeout_ms=timeout_ms)
+    return _parse_post_html(html)
+
+
+def _fetch_post_embed_goto(
+    page: Page,
+    shortcode: str,
+    *,
+    kind: str = "p",
+    timeout_ms: int = 120_000,
+) -> tuple[str, str]:
+    url = _embed_url(shortcode, kind)
+    last_exc: Exception | None = None
+    for wait_until in ("commit", "domcontentloaded"):
+        try:
+            page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+            last_exc = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    if last_exc is not None:
+        raise RuntimeError(f"embed navigation failed for {shortcode}: {last_exc}") from last_exc
+    time.sleep(1)
+    html = page.content()
+    return _parse_post_html(html)
+
+
+def _reload_hashtag_page(page: Page, hashtag_url: str, *, timeout_ms: int = 120_000) -> None:
+    last_exc: Exception | None = None
+    for wait_until in ("commit", "domcontentloaded"):
+        try:
+            page.goto(hashtag_url, wait_until=wait_until, timeout=timeout_ms)
+            time.sleep(1.5)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    raise RuntimeError(f"failed to reload hashtag page: {last_exc}") from last_exc
+
+
+def _ensure_post_link_visible(
+    page: Page,
+    shortcode: str,
+    *,
+    kind: str = "p",
+    hashtag_url: str | None = None,
+    timeout_ms: int = 120_000,
+) -> None:
+    """Scroll the hashtag grid until the post thumbnail link is on screen."""
+    href_part = f"/{kind}/{shortcode}"
+
+    def _find_and_center() -> bool:
+        return page.evaluate(
+            """([part]) => {
+                for (const a of document.querySelectorAll('a[href*="' + part + '"]')) {
+                    a.scrollIntoView({ block: 'center', behavior: 'instant' });
+                    const r = a.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) return true;
+                }
+                return false;
+            }""",
+            href_part,
+        )
+
+    def _scan_grid() -> bool:
+        page.evaluate("window.scrollTo(0, 0)")
+        time.sleep(0.4)
+        for _ in range(35):
+            if _find_and_center():
+                time.sleep(0.6)
+                return True
+            page.evaluate("window.scrollBy(0, window.innerHeight * 0.75)")
+            time.sleep(0.35)
+        return False
+
+    if _find_and_center() or _scan_grid():
+        return
+    if hashtag_url:
+        _reload_hashtag_page(page, hashtag_url, timeout_ms=timeout_ms)
+        if _scan_grid():
+            return
+    raise RuntimeError(f"post {shortcode} not visible on page for modal open")
+
+
+def _fetch_post_via_modal(
+    page: Page,
+    shortcode: str,
+    *,
+    kind: str = "p",
+    timeout_ms: int = 120_000,
+    hashtag_url: str | None = None,
+) -> tuple[str, str]:
+    _ensure_post_link_visible(
+        page,
+        shortcode,
+        kind=kind,
+        hashtag_url=hashtag_url,
+        timeout_ms=timeout_ms,
+    )
+    href_part = f"/{kind}/{shortcode}"
+    link = page.locator(f'a[href*="{href_part}"]').first
+    try:
+        link.wait_for(state="visible", timeout=min(8000, timeout_ms // 4))
+    except Exception as exc:
+        raise RuntimeError(f"post {shortcode} not visible on page for modal open") from exc
+    time.sleep(0.6)
+    link.click()
+    try:
+        page.wait_for_function(
+            """() => {
+                const root = document.querySelector('div[role="dialog"]') || document.querySelector('article');
+                if (!root) return false;
+                return [...root.querySelectorAll('img')].some(
+                    (img) => img.src.includes('scontent') && !img.src.includes('s150x150')
+                );
+            }""",
+            timeout=min(20_000, timeout_ms // 2),
+        )
+    except Exception:
+        time.sleep(2)
+    time.sleep(1.2)
+    _expand_modal_caption(page)
+    data = page.evaluate(_MODAL_EXTRACT_JS)
+    if not data:
+        page.keyboard.press("Escape")
+        raise RuntimeError(f"modal did not open for {shortcode}")
+    image_url = _pick_image_url([str(u) for u in data.get("images") or [] if isinstance(u, str)])
+    if not image_url:
+        page.keyboard.press("Escape")
+        raise RuntimeError(f"no image in modal for {shortcode}")
+    caption = _caption_from_modal_data(data)
+    if not caption:
+        caption = _extract_caption_from_page(page)
+    if not caption:
+        caption = _try_fetch_caption_only(page, shortcode, kind=kind, timeout_ms=timeout_ms)
+    page.keyboard.press("Escape")
+    time.sleep(1.2)
+    return caption, image_url
+
+
+def _fetch_post_full_goto(
+    page: Page,
+    shortcode: str,
+    *,
+    kind: str = "p",
+    timeout_ms: int = 120_000,
+) -> tuple[str, str]:
     url = f"https://www.instagram.com/{kind}/{shortcode}/"
     nav_error: Exception | None = None
-    for attempt in range(5):
+    for attempt in range(3):
         for wait_until in ("commit", "domcontentloaded"):
             try:
                 page.goto(url, wait_until=wait_until, timeout=timeout_ms)
@@ -166,22 +461,9 @@ def fetch_post_via_browser(
                 break
             except Exception as exc:  # noqa: BLE001
                 nav_error = exc
-                log.debug(
-                    "goto %s wait=%s attempt %d failed: %s",
-                    shortcode,
-                    wait_until,
-                    attempt + 1,
-                    exc,
-                )
         if nav_error is None:
             break
-        err = str(nav_error)
-        if any(x in err for x in ("NET_EMPTY", "NET_TIMEOUT", "ABORTED", "TIMED_OUT")):
-            try:
-                page.goto("https://www.instagram.com/", wait_until="commit", timeout=timeout_ms)
-            except Exception:
-                pass
-            time.sleep(5 + attempt * 3)
+        time.sleep(3 + attempt * 2)
     if nav_error is not None:
         raise RuntimeError(f"browser navigation failed for {shortcode}: {nav_error}") from nav_error
 
@@ -194,7 +476,7 @@ def fetch_post_via_browser(
                     (img) => img.src.includes('scontent') && !img.src.includes('s150x150')
                 );
             }""",
-            timeout=15000,
+            timeout=15_000,
         )
     except Exception:
         time.sleep(2)
@@ -203,7 +485,66 @@ def fetch_post_via_browser(
     if not image_url:
         raise RuntimeError(f"no image on post page for {shortcode}")
     caption = _caption_from_og_description(str(data.get("ogDesc") or ""))
+    if not caption:
+        caption = _extract_caption_from_page(page)
     return caption, image_url
+
+
+def fetch_post_via_browser(
+    page: Page,
+    shortcode: str,
+    *,
+    kind: str = "p",
+    timeout_ms: int = 120_000,
+    prefer_modal: bool = False,
+    lightweight_only: bool = False,
+    hashtag_url: str | None = None,
+) -> tuple[str, str]:
+    """Return (caption, image_url) using a logged-in Playwright page.
+
+    Tries lighter strategies first (modal / in-page embed fetch) because full
+    ``/p/`` navigation often fails with NS_ERROR_NET_EMPTY_RESPONSE on VPN.
+    """
+    strategies: list[tuple[str, Any]] = []
+    modal_kw = {"kind": kind, "timeout_ms": timeout_ms, "hashtag_url": hashtag_url}
+    if prefer_modal:
+        strategies.append(("modal", lambda: _fetch_post_via_modal(page, shortcode, **modal_kw)))
+    if not lightweight_only:
+        strategies.extend(
+            [
+                ("embed-fetch", lambda: _fetch_post_embed_inpage(page, shortcode, kind=kind, timeout_ms=timeout_ms)),
+                ("embed-goto", lambda: _fetch_post_embed_goto(page, shortcode, kind=kind, timeout_ms=timeout_ms)),
+            ]
+        )
+    elif not prefer_modal:
+        strategies.append(
+            ("embed-fetch", lambda: _fetch_post_embed_inpage(page, shortcode, kind=kind, timeout_ms=timeout_ms))
+        )
+    if not prefer_modal:
+        strategies.append(("modal", lambda: _fetch_post_via_modal(page, shortcode, **modal_kw)))
+    if not lightweight_only:
+        strategies.append(("full-goto", lambda: _fetch_post_full_goto(page, shortcode, kind=kind, timeout_ms=timeout_ms)))
+
+    errors: list[str] = []
+    best_image: str | None = None
+    for name, fn in strategies:
+        try:
+            caption, image_url = fn()
+            if image_url and not best_image:
+                best_image = image_url
+            if caption.strip():
+                log.debug("fetched %s via %s", shortcode, name)
+                return caption, image_url
+            if image_url:
+                errors.append(f"{name}: empty caption")
+                continue
+            errors.append(f"{name}: no image")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name}: {exc}")
+            log.debug("fetch %s via %s failed: %s", shortcode, name, exc)
+    if best_image:
+        raise RuntimeError(f"got image but no caption for {shortcode}: {'; '.join(errors)}")
+    raise RuntimeError(f"all fetch strategies failed for {shortcode}: {'; '.join(errors)}")
 
 
 def _download_image_browser(page: Page, url: str, dest: Path, *, timeout: float = 60.0) -> None:
@@ -272,6 +613,8 @@ def import_shortcodes(
     page: Page | None = None,
     browser_context: BrowserContext | None = None,
     sarcasm_candidates: bool = False,
+    prefer_modal: bool = False,
+    hashtag_url: str | None = None,
 ) -> int:
     if require_face:
         try:
@@ -289,14 +632,16 @@ def import_shortcodes(
         browser_context = page.context
 
     jsonl_path = out_dir / f"{pool_name}.jsonl"
-    image_dir = out_dir / pool_name
+    image_dir = out_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
     seen = _existing_shortcodes(jsonl_path)
 
     written = 0
     skipped_no_face = 0
+    skipped_no_caption = 0
     skipped_not_sarcasm = 0
     consecutive_fetch_failures = 0
+    lightweight_fetch = False
     post_timeout_ms = max(int(timeout * 1000), 120_000)
     with jsonl_path.open("a", encoding="utf-8") as out:
         for i, ref in enumerate(refs):
@@ -315,39 +660,49 @@ def import_shortcodes(
                         shortcode,
                         kind=ref.kind,
                         timeout_ms=post_timeout_ms,
+                        prefer_modal=prefer_modal,
+                        lightweight_only=lightweight_fetch,
+                        hashtag_url=hashtag_url,
                     )
                 else:
                     caption_raw, image_url = fetch_embed_post(shortcode, timeout=timeout)
             except Exception as exc:  # noqa: BLE001 — playwright/network errors vary
                 consecutive_fetch_failures += 1
+                lightweight_fetch = consecutive_fetch_failures >= 2
                 log.warning("skip %s: fetch failed (%s)", shortcode, exc)
                 if consecutive_fetch_failures >= 3:
-                    pause = min(30, 10 * consecutive_fetch_failures)
+                    pause = min(60, 15 * consecutive_fetch_failures)
                     log.warning(
-                        "Pausing %ds after %d consecutive fetch failures (VPN/rate limit?)",
+                        "Pausing %ds after %d consecutive fetch failures (rate limit? use --delay 8)",
                         pause,
                         consecutive_fetch_failures,
                     )
                     time.sleep(pause)
-                if consecutive_fetch_failures >= 8:
+                if consecutive_fetch_failures >= 6:
                     log.error(
-                        "Stopping import after %d consecutive failures — check VPN, wait, retry with --delay 5",
+                        "Stopping import after %d consecutive failures — wait 10 min, retry with --delay 8",
                         consecutive_fetch_failures,
                     )
                     break
                 time.sleep(delay)
                 continue
             consecutive_fetch_failures = 0
+            lightweight_fetch = False
 
             caption = preprocess_caption(caption_raw)
-            if caption and not is_persian_enough(caption):
+            if not caption:
+                skipped_no_caption += 1
+                log.warning("skip %s: empty caption", shortcode)
+                time.sleep(delay / 2)
+                continue
+            if not is_persian_enough(caption):
                 log.warning("skip %s: caption not Persian enough", shortcode)
                 continue
-            if caption and is_spam_caption(caption):
+            if is_spam_caption(caption):
                 _remember_ignored(shortcode)
                 seen.add(shortcode)
                 continue
-            if sarcasm_candidates and caption and not is_sarcasm_candidate_caption(caption):
+            if sarcasm_candidates and not is_sarcasm_candidate_caption(caption):
                 skipped_not_sarcasm += 1
                 log.debug("skip %s: caption lacks sarcasm/irony cues", shortcode)
                 continue
@@ -381,7 +736,11 @@ def import_shortcodes(
             seen.add(shortcode)
             written += 1
             log.info("imported %s", shortcode)
+            if use_browser:
+                time.sleep(max(1.0, delay / 3))
 
+    if skipped_no_caption:
+        log.info("skipped %d posts with empty caption", skipped_no_caption)
     if skipped_no_face:
         log.info(
             "skipped %d posts with no face (IDs saved to %s)",
