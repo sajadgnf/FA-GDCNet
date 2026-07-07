@@ -1,4 +1,11 @@
 # Public hashtag discovery — one tag per line (lines starting with # are ignored).
+# All collected posts go into datasets/raw/hashtags.jsonl (use --pool-name hashtags).
+#
+# Sarcasm-oriented collection (same pool):
+#   python tasks.py collect-hashtags --hashtags-file datasets/raw/hashtags.txt --hashtag-contains --pool-name hashtags --max-count 40 --sarcasm-candidates --headed --delay 10 --scrolls 12
+# Label:
+#   python tasks.py label --annotator sjjd6502 --input datasets/raw/hashtags.jsonl
+#
 # Selfies & portraits
 #سلفی
 #سلفی_آینه
