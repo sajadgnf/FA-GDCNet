@@ -1,0 +1,9 @@
+{
+  "backend": "cpu",
+  "n_samples": 5,
+  "median_latency_s": 24.853482800070196,
+  "p95_latency_s": 31.243962400127202,
+  "peak_memory_bytes": 4183150592,
+  "peak_memory_gib": 3.895862579345703,
+  "under_1gib_budget": false
+}
