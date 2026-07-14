@@ -472,3 +472,10 @@
 {"post_id": "DaROB1IoPO7", "label": "positive_sarcasm", "annotator_id": "sjjd6502", "timestamp": "2026-07-09T17:12:30.191024+00:00"}
 {"post_id": "DafSZTKItjK", "label": "positive_sarcasm", "annotator_id": "sjjd6502", "timestamp": "2026-07-09T17:13:14.205278+00:00"}
 {"post_id": "DaYEtOIKABS", "label": "positive", "annotator_id": "sjjd6502", "timestamp": "2026-07-09T17:13:24.156659+00:00"}
+{"post_id": "DAGHTqFuh-U", "label": "negative", "annotator_id": "sjjd6502", "timestamp": "2026-07-14T06:07:14.961742+00:00"}
+{"post_id": "DLmV_p-IqDW", "label": "negative", "annotator_id": "sjjd6502", "timestamp": "2026-07-14T06:07:27.439563+00:00"}
+{"post_id": "DKmoGtKozxE", "label": "positive", "annotator_id": "sjjd6502", "timestamp": "2026-07-14T06:08:10.449398+00:00"}
+{"post_id": "DQcc6b1iM24", "label": "positive", "annotator_id": "sjjd6502", "timestamp": "2026-07-14T06:08:40.351944+00:00"}
+{"post_id": "DapY2oWsCjw", "label": "positive", "annotator_id": "sjjd6502", "timestamp": "2026-07-14T06:09:07.146906+00:00"}
+{"post_id": "DKHVnXrIwFV", "label": "positive", "annotator_id": "sjjd6502", "timestamp": "2026-07-14T06:09:37.761279+00:00"}
+{"post_id": "DZZiUK_NGWo", "label": "negative", "annotator_id": "sjjd6502", "timestamp": "2026-07-14T06:10:08.564022+00:00"}
