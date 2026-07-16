@@ -1,48 +1,34 @@
-# Public hashtag discovery — one tag per line (lines starting with # are ignored).
-# All collected posts go into datasets/raw/hashtags.jsonl (use --pool-name hashtags).
-#
-# Sarcasm-oriented collection (same pool):
-#   python tasks.py collect-hashtags --hashtags-file datasets/raw/hashtags.txt --hashtag-contains --pool-name hashtags --max-count 40 --sarcasm-candidates --headed --delay 10 --scrolls 12
-# Label:
-#   python tasks.py label --annotator sjjd6502 --input datasets/raw/hashtags.jsonl
-#
+
 # Selfies & portraits
-#سلفی
-#سلفی_آینه
-#پرتره
-#عکاسی_پرتره
-#selfie
-#
+سلفی
+سلفی_آینه
+selfie
+
 ## Daily life & mood
-#روزمره
-#روزمرگی
-#لحظات
-#خاطره
-#خاطرات
-#زندگی_روزمره
-#لایفستایل
-#
+روزمره
+روزمرگی
+لحظات
+خاطره
+خاطرات
+زندگی_روزمره
+لایفستایل
+
 ## Social & friends
-#دوستان
-#دوستی
-#رفاقت
-#خانواده
-#
-#
+دوستان
+دوستی
+رفاقت
+خانواده
+
+
 ## Mood & captions
-#حس_خوب
-#خوشحالی
-#شادی
-#انگیزشی
-#
-## Humor
-#طنز
-#فان
-#
+حس_خوب
+غم
+?حس
+
 ## Places & lifestyle (often have faces)
-#کافه
-#کافه_گردی
-#دانشگاه
+کافه
+کافه_گردی
+دانشگاه
 
 # Discovery
 اکسپلور
@@ -51,3 +37,9 @@
 ?کنایه
 ?تیکه
 ?طنز
+?تیکه_دار 
+?دلنوشته 
+?متن
+?متن_سنگین
+?تیکه_سنگین
+فان
