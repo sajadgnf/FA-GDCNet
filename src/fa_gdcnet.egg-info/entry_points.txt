@@ -1,2 +1,0 @@
-[console_scripts]
-fa-gdcnet = fa_gdcnet_cli:main

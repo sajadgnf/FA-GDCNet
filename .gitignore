@@ -22,10 +22,11 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Editor
+# Editor / local AI workflow (not part of the shipped project)
 .idea/
 .vscode/
 .cursor/
+openspec/
 
 # OS
 .DS_Store
@@ -34,14 +35,21 @@ Thumbs.db
 # Downloaded model weights (use scripts/fetch_mclip.py)
 models/
 
-# Project data — DO NOT COMMIT raw scraped Instagram images (TOS).
-datasets/raw/
-artifacts/
+# Project data — DO NOT COMMIT scraped Instagram media (TOS).
+# JSONL/TXT metadata under datasets/raw/ may be tracked; images must stay local.
+datasets/raw/**/*.jpg
+datasets/raw/**/*.jpeg
+datasets/raw/**/*.webp
+datasets/raw/**/*.png
+datasets/raw/**/*.gif
+artifacts/*
+!artifacts/.gitkeep
 reports/*.csv
 reports/*.json
 reports/*.png
 reports/*.html
 reports/explain/
+reports/eval_run.log
 
 # Keep directory placeholders
 !datasets/.gitkeep

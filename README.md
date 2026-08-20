@@ -15,7 +15,7 @@ FA-GDCNet یک خط لوله سبک و **بدون نیاز به آموزش مج�
 این سامانه با ترکیب سه مدل سبک (همگی فریزشده) کار می‌کند:
 
 1. **`SmolVLM-256M`** — تولید توصیف عینی (`T̂`) از تصویر.
-2. **`M-CLIP-ViT-B-32`** — تعبیه متن فارسی و تصویر در یک فضای برداری مشترک.
+2. **`M-CLIP` (`XLM-Roberta-Large-Vit-B-32`)** — تعبیه متن فارسی و تصویر در یک فضای برداری مشترک.
 3. **`ParsBERT`** — استخراج قطبیت احساسی متن فارسی.
 
 سپس سه شاخص اختلاف محاسبه می‌شود:
@@ -26,28 +26,40 @@ FA-GDCNet یک خط لوله سبک و **بدون نیاز به آموزش مج�
 
 این سه شاخص (به‌همراه چند ویژگی کمکی) به یک طبقه‌بند سبک sklearn (`LogisticRegression`) داده می‌شوند و برچسب نهایی تولید می‌شود.
 
+استخراج ویژگی‌ها **مرحله‌به‌مرحله** است (هر بار یک مدل روی GPU) تا اوج VRAM زیر ۱ گیگابایت بماند. برج متنی M-CLIP به‌خاطر حجم وزن‌ها روی **CPU** اجرا می‌شود.
+
 ### نصب سریع
 
-```bash
-git clone <repo>
-cd test
+```powershell
+cd FA-GDCNet
 python -m venv .venv
-.venv\Scripts\activate          # ویندوز
+.\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+
+# PyTorch با CUDA (اگر GPU دارید):
+# pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+# وزن‌های M-CLIP (~۲٫۱ گیگ — در گیت نیست):
+python scripts/fetch_mclip.py
 ```
 
 ### کوئیک‌استارت
 
-```bash
-# بدون اینستاگرام (دمو مصنوعی — برای تست خط لوله):
+```powershell
+# دمو مصنوعی (بدون اینستاگرام):
 python scripts/proposal_demo.py
 
-# با اینستاگرام (نیاز به لاگین — ر.ک. زیر):
-python tasks.py scrape --following --max-count 200 --session-user YOUR_IG_USERNAME
-python tasks.py label
-python tasks.py train
-python tasks.py eval
+# خط لوله کامل روی دیتاست برچسب‌خورده (استخراج + آموزش + ارزیابی):
+python tasks.py finish
+
+# داشبورد توضیح‌پذیری:
 python tasks.py dashboard
+```
+
+اگر فقط استخراج ویژگی را می‌خواهید (قابل ازسرگیری):
+
+```powershell
+python tasks.py extract
 ```
 
 ### اسکرپ اینستاگرام (الزام لاگین)
@@ -56,49 +68,35 @@ python tasks.py dashboard
 
 **روش پیشنهادی — پست‌های اکانت‌های واقعی (نه هشتگ):**
 
-هشتگ‌ها معمولاً منظره، تبلیغ و محتوای عمومی می‌دهند — برای داده چندوجهی با چهره و متن روزمره مناسب نیستند.
-به‌جای آن از فید **following** یا اکانت‌های شخصی استفاده کنید:
-
-```bash
-pip install instaloader
-instaloader --login YOUR_INSTAGRAM_USERNAME
-# پیش‌فرض: پست‌های افرادی که فالو کرده‌اید
-python tasks.py scrape --following --max-count 200 --session-user YOUR_INSTAGRAM_USERNAME
-# یا یک اکانت عمومی مشخص:
-python tasks.py scrape --profile SOME_USERNAME --max-count 50 --session-user YOUR_INSTAGRAM_USERNAME
+```powershell
+python tasks.py scrape-session --user YOUR_IG_USERNAME --browser firefox
+python tasks.py scrape --following --max-count 200 --session-user YOUR_IG_USERNAME
+python tasks.py label
+python tasks.py finish
+python tasks.py dashboard
 ```
 
-اگر `instaloader --login` با پیام `Unexpected null login result` شکست خورد:
-
-```bash
-# 1) یک session معتبر با روش cookie/browser در instaloader بسازید.
-# 2) مسیر فایل session را صریح بدهید:
-python tasks.py scrape --following --max-count 200 \
-  --session-user YOUR_INSTAGRAM_USERNAME \
-  --session-file /path/to/session-YOUR_INSTAGRAM_USERNAME
-```
-
-**یا با رمز عبور (کمتر امن — فقط برای تست):**
+اگر `instaloader --login` شکست خورد، مسیر فایل session را صریح بدهید:
 
 ```powershell
-$env:INSTAGRAM_USERNAME="your_user"
-$env:INSTAGRAM_PASSWORD="your_pass"
-python tasks.py scrape --following --max-count 200
+python tasks.py scrape --following --max-count 200 `
+  --session-user YOUR_IG_USERNAME `
+  --session-file "C:\path\to\session-YOUR_IG_USERNAME"
 ```
 
-**اگر `--following` خطای 400 داد یا لیست خالی بود** (مشکل رایج اینستاگرام در ۲۰۲۵–۲۰۲۶):
+**اگر `--following` خطای 400 داد یا لیست خالی بود:**
 
-```bash
-# ۱) نصب نسخه اصلاح‌شده instaloader (پروفایل‌ها بدون آن کار نمی‌کنند)
-pip install -e ".[dev]"
-
-# ۲) فایل accounts.txt بسازید — یوزرنیم دوستان/صفحاتی که فالو کرده‌اید:
+```powershell
 copy datasets\raw\accounts.example.txt datasets\raw\accounts.txt
 # accounts.txt را ویرایش کنید، سپس:
 python tasks.py scrape --profiles-file datasets/raw/accounts.txt --max-count 200 --session-user YOUR_IG_USERNAME
 ```
 
 اگر اسکرپ ممکن نیست، از `python scripts/proposal_demo.py` برای آزمایش بقیه مراحل استفاده کنید.
+
+### نتایج ارزیابی
+
+پس از `python tasks.py finish` (یا `eval`)، خلاصهٔ ادعاهای پروپوزال در `reports/REPORT.md` نوشته می‌شود.
 
 ### نکته حقوقی
 
@@ -116,50 +114,87 @@ FA-GDCNet is a lightweight, **training-free** multimodal pipeline for Persian se
 
 ```
 caption (FA)  ─┐
-               ├─► M-CLIP text emb ─┐
-                                     │
-image  ────────┼─► SmolVLM-256M caption (T̂) ─► M-CLIP text emb ─┐
-               │                                                  │
-               └─► M-CLIP image emb ──────────────────────────────┤
-                                                                  ▼
-                                                ┌──────────────────────────────┐
-                                                │ GDRM: Dsem, Dsen, Fvt + aux │
-                                                └──────────────────────────────┘
-                                                                  │
-                                                                  ▼
-                                          ┌────────────────────────────────────┐
-                                          │ LogisticRegression (5-class head)  │
-                                          └────────────────────────────────────┘
-                                                                  │
-                                                                  ▼
-                                          {label, confidence, low_fidelity_flag}
+               ├─► M-CLIP text emb (CPU) ─┐
+                                          │
+image  ────────┼─► SmolVLM-256M caption (T̂) ─► M-CLIP text emb (CPU) ─┐
+               │                                                        │
+               └─► M-CLIP image emb (CUDA) ─────────────────────────────┤
+                                                                        ▼
+                                                      ┌──────────────────────────────┐
+                                                      │ GDRM: Dsem, Dsen, Fvt + aux │
+                                                      └──────────────────────────────┘
+                                                                        │
+                                                                        ▼
+                                                ┌────────────────────────────────────┐
+                                                │ LogisticRegression (5-class head)  │
+                                                └────────────────────────────────────┘
+                                                                        │
+                                                                        ▼
+                                                {label, confidence, low_fidelity_flag}
 ```
+
+Feature extraction is **staged** (one backbone resident at a time). The M-CLIP text tower runs on **CPU** because XLM-Roberta-Large fp16 weights alone are ~1.04 GiB; captions / image / polarity stages stay under the 1 GiB VRAM budget on CUDA.
 
 ### Constraints
 
-- VRAM ≤ 1 GiB at inference (`make profile` checks this).
+- Peak **VRAM ≤ 1 GiB** in the staged path (`python -m eval.profile_staged` → `reports/profile_staged.json`).
 - No backbone fine-tuning. Verified by `inference.models.assert_frozen(...)`.
 - 5-class single label output.
+
+### Setup
+
+```powershell
+cd FA-GDCNet
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+# Optional CUDA torch:
+# pip install torch --index-url https://download.pytorch.org/whl/cu124
+python scripts/fetch_mclip.py   # ~2.1 GB local M-CLIP checkpoint
+```
+
+### Quick start
+
+```powershell
+# Synthetic demo (no Instagram):
+python scripts/proposal_demo.py
+
+# Full thesis pipeline on the labeled dataset:
+python tasks.py finish          # extract → train → eval → reports/REPORT.md
+python tasks.py dashboard
+```
+
+Resume extraction only:
+
+```powershell
+python tasks.py extract
+# or one stage at a time:
+python tasks.py extract --stage captions
+python tasks.py extract --stage mclip
+python tasks.py extract --stage polarity
+python tasks.py extract --stage assemble
+```
 
 ### Repository Layout
 
 ```
 src/
   data/        Instagram scraper, FA preprocessing, labeling tool, schema, kappa
-  inference/   model loaders, GDRM, classifier, pipeline, LanceDB store
+  inference/   model loaders, GDRM, staged extraction, classifier, pipeline
   explain/     Attention Rollout, RTL remap, HTML/PNG render, Streamlit dashboard
-  eval/        metrics, profile, ablation, baseline, final report builder
+  eval/        metrics, staged profile, ablation, baseline, final report builder
+scripts/       fetch_mclip.py, proposal_demo.py, augment_sarcasm.py, …
 tests/         Pure-Python unit tests (no heavy deps required)
 docs/          Architecture and design notes
-datasets/      Local scraped & labeled data (gitignored)
-reports/       Generated CSV / JSON / PNG / Markdown outputs (gitignored)
-artifacts/     Trained classifier + LanceDB vectors (gitignored)
-notebooks/     Optional analysis notebooks
+datasets/      Local scraped & labeled data (gitignored images)
+reports/       Generated CSV / JSON / PNG / Markdown outputs
+artifacts/     Features cache, stage JSONL checkpoints, trained classifier
+models/        Local M-CLIP weights (gitignored; use scripts/fetch_mclip.py)
 ```
 
 ### Running Tests
 
-```bash
+```powershell
 pip install -e ".[dev]"
 pytest
 ```
@@ -168,18 +203,23 @@ Tests that exercise the heavy backbones (`tests/test_pipeline.py`, parts of `tes
 
 ### CLI
 
-A small `tasks.py` wraps the common workflows:
+`tasks.py` wraps the common workflows:
 
 | Command | Description |
 | --- | --- |
-| `python tasks.py scrape --following --max-count N` | Scrape recent posts from accounts you follow (recommended). |
-| `python tasks.py scrape --profile USER` | Scrape a specific personal account. |
-| `python tasks.py label` | Launch the CLI 5-class annotation tool. |
+| `python scripts/fetch_mclip.py` | Download M-CLIP weights into `models/` (required once). |
+| `python tasks.py extract` | Staged feature extraction (resumable; one backbone at a time). |
 | `python tasks.py train` | Train the sklearn classifier on the labeled dataset. |
-| `python tasks.py eval` | Run metrics + profile + ablation + baseline. |
+| `python tasks.py eval` | Metrics + sarcasm + staged profile + ablation + baseline + report. |
+| `python tasks.py finish` | Extract → train (from cache) → full eval suite. |
 | `python tasks.py dashboard` | Launch the Streamlit explainability dashboard. |
+| `python tasks.py scrape --following --max-count N` | Scrape recent posts from accounts you follow. |
+| `python tasks.py scrape --profile USER` | Scrape a specific account. |
+| `python tasks.py scrape-session --user USER` | Import Instagram session from browser cookies. |
+| `python tasks.py label` | CLI 5-class annotation tool. |
+| `python tasks.py augment-sarcasm` | Append weak-labeled sarcasm posts from the archive pool. |
 
-See `docs/architecture.md` for the full data flow and module-level rationale.
+See `docs/architecture.md` for the full data flow and `reports/REPORT.md` for the latest proposal-claims checklist.
 
 ### License
 
