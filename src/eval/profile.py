@@ -94,9 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    records = list(iter_dataset(args.dataset))[: args.n]
+    records = [r for r in iter_dataset(args.dataset) if Path(r.image_path).is_file()][: args.n]
     if not records:
-        log.error("no dataset records at %s", args.dataset)
+        log.error("no dataset records with usable images at %s", args.dataset)
         return 1
     samples = [(r.caption, r.image_path) for r in records]
     pipeline = Pipeline.from_pretrained()

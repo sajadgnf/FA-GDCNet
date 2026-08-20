@@ -104,6 +104,24 @@ def features_from_records(records: Iterable[dict]) -> tuple[np.ndarray, np.ndarr
     return np.vstack(X_rows), np.asarray(y_rows, dtype=object)
 
 
+def _warn_on_degenerate_features(X: np.ndarray) -> None:
+    """Flag zero-variance columns, which carry no signal for the classifier.
+
+    A constant column almost always means an upstream encoder failed silently
+    rather than that the data is genuinely uniform.
+    """
+    constant = [
+        FEATURE_NAMES[i] for i in range(X.shape[1]) if float(np.std(X[:, i])) == 0.0
+    ]
+    if constant:
+        log.error(
+            "features %s are constant across all %d samples and contribute nothing; "
+            "check that the corresponding encoder loaded its weights",
+            ", ".join(constant),
+            X.shape[0],
+        )
+
+
 def compute_dataset_features(
     dataset_path: Path,
     *,
@@ -131,8 +149,18 @@ def compute_dataset_features(
     X_rows: list[np.ndarray] = []
     y_rows: list[str] = []
     post_ids: list[str] = []
+    skipped = 0
     for rec in iter_dataset(dataset_path):
-        image = Image.open(rec.image_path).convert("RGB")
+        image_path = Path(rec.image_path)
+        if not image_path.is_file():
+            log.warning(
+                "skipping %s: image not found at %s",
+                rec.post_id,
+                rec.image_path,
+            )
+            skipped += 1
+            continue
+        image = Image.open(image_path).convert("RGB")
         text_emb_T = embed_text_mclip(bundle, rec.caption)
         T_hat = caption_image(bundle, image)
         text_emb_T_hat = embed_text_mclip(bundle, T_hat)
@@ -154,7 +182,15 @@ def compute_dataset_features(
         y_rows.append(rec.label)
         post_ids.append(rec.post_id)
 
+    if skipped:
+        log.warning("skipped %d records with missing images", skipped)
+    if not X_rows:
+        raise FileNotFoundError(
+            f"no usable images found for dataset {dataset_path}"
+        )
+
     X = np.vstack(X_rows)
+    _warn_on_degenerate_features(X)
     y = np.asarray(y_rows, dtype=object)
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)

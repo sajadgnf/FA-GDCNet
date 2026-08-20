@@ -26,7 +26,10 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 DEFAULT_BASELINE_CSV = Path("reports") / "baseline.csv"
+DEFAULT_BASELINE_SARCASM_CSV = Path("reports") / "baseline_sarcasm.csv"
 DEFAULT_BASELINE_FEATURES = Path("artifacts") / "baseline_features.npz"
+
+SARCASM_LABELS = frozenset({"positive_sarcasm", "negative_sarcasm"})
 
 
 def _compute_baseline_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -34,19 +37,26 @@ def _compute_baseline_features(dataset: Path, cache: Path) -> tuple[np.ndarray, 
         npz = np.load(cache, allow_pickle=True)
         return npz["X"], npz["y"]
 
-    from inference.models import load_backbones, polarity_probs
+    from inference.models import load_polarity_only, polarity_probs
 
-    bundle = load_backbones()
+    # Records without a readable image are excluded from the multimodal features,
+    # so the baseline must skip them too or the two are not comparable.
+    records = [r for r in iter_dataset(dataset) if Path(r.image_path).is_file()]
+
+    bundle = load_polarity_only()
     X_rows: list[np.ndarray] = []
     y_rows: list[str] = []
-    for rec in iter_dataset(dataset):
+    post_ids: list[str] = []
+    for rec in records:
         probs = polarity_probs(bundle, rec.caption)
         X_rows.append(np.asarray(probs, dtype=np.float32))
         y_rows.append(rec.label)
+        post_ids.append(rec.post_id)
     X = np.vstack(X_rows)
     y = np.asarray(y_rows, dtype=object)
     cache.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(cache, X=X, y=y)
+    np.savez_compressed(cache, X=X, y=y, post_ids=np.asarray(post_ids, dtype=object))
+    log.info("baseline features: %d samples", X.shape[0])
     return X, y
 
 
@@ -76,6 +86,42 @@ def evaluate(X: np.ndarray, y: np.ndarray) -> dict:
         "macro_f1": macros,
         "per_class_f1": per_class,
     }
+
+
+def evaluate_binary_sarcasm(X: np.ndarray, y: np.ndarray) -> dict:
+    y_bin = np.asarray([1 if lbl in SARCASM_LABELS else 0 for lbl in y], dtype=int)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    accs: list[float] = []
+    f1s: list[float] = []
+    for train_idx, test_idx in skf.split(X, y_bin):
+        clf = LogisticRegression(
+            class_weight="balanced",
+            penalty="l2",
+            solver="lbfgs",
+            max_iter=2000,
+            random_state=0,
+        )
+        clf.fit(X[train_idx], y_bin[train_idx])
+        preds = clf.predict(X[test_idx])
+        true = y_bin[test_idx]
+        accs.append(accuracy_score(true, preds))
+        f1s.append(f1_score(true, preds, zero_division=0))
+    return {"accuracy": accs, "f1": f1s}
+
+
+def write_sarcasm_csv(result: dict, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["fold", "accuracy", "f1"])
+        for i in range(len(result["accuracy"])):
+            w.writerow([i + 1, result["accuracy"][i], result["f1"][i]])
+        w.writerow([
+            "mean±std",
+            f"{np.mean(result['accuracy']):.4f}±{np.std(result['accuracy']):.4f}",
+            f"{np.mean(result['f1']):.4f}±{np.std(result['f1']):.4f}",
+        ])
+    return path
 
 
 def write_csv(result: dict, path: Path) -> Path:
@@ -115,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
     result = evaluate(X, y)
     out = write_csv(result, args.out)
     log.info("wrote %s", out)
+    sarcasm = evaluate_binary_sarcasm(X, y)
+    sarcasm_out = write_sarcasm_csv(sarcasm, DEFAULT_BASELINE_SARCASM_CSV)
+    log.info("wrote %s", sarcasm_out)
     return 0
 
 
