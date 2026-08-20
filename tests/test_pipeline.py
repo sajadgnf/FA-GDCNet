@@ -56,6 +56,44 @@ def test_predict_from_features_returns_argmax_label():
     assert pred.confidence == pytest.approx(0.81)
 
 
+def test_polarity_conflict_promotes_negative_sarcasm():
+    """Negative caption + positive T̂ should not stay plain ``negative``."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.4,
+        Dsen=0.57,
+        Fvt=0.3,
+        cos_TI=0.2,
+        polarity_T=-0.07,
+        polarity_T_hat=0.50,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("negative")] = 0.24
+    label, conf = refine_label_for_polarity_conflict("negative", 0.24, proba, feats)
+    assert label == "negative_sarcasm"
+    assert conf >= 0.35
+
+
+def test_polarity_conflict_promotes_positive_sarcasm():
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.5,
+        Dsen=0.8,
+        Fvt=0.4,
+        cos_TI=0.2,
+        polarity_T=0.7,
+        polarity_T_hat=-0.5,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("positive")] = 0.4
+    label, _ = refine_label_for_polarity_conflict("positive", 0.4, proba, feats)
+    assert label == "positive_sarcasm"
+
+
 def test_predict_from_features_low_fidelity_flag_set_when_fvt_below_tau():
     pack = _make_clf_pack(target_label="neutral")
     pipeline = Pipeline(bundle=_FakeBundle(), clf_pack=pack, fvt_threshold=0.3)

@@ -71,6 +71,20 @@ def test_polarity_scalar_range():
     assert polarity_scalar(np.array([0.5, 0.5])) == pytest.approx(0.0)
 
 
+def test_canonicalize_snappfood_happy_sad_order():
+    """Snappfood head is HAPPY=0, SAD=1 — must become (p_neg, p_pos)."""
+    from inference.models import _canonicalize_polarity_probs
+
+    class _M:
+        config = type("C", (), {"id2label": {0: "HAPPY", 1: "SAD"}})()
+
+    # Model is confident SAD → ordered [p_sad, p_happy] → negative scalar
+    ordered = _canonicalize_polarity_probs(np.array([0.1, 0.9], dtype=np.float32), _M())
+    assert ordered[0] == pytest.approx(0.9)  # neg
+    assert ordered[1] == pytest.approx(0.1)  # pos
+    assert polarity_scalar(ordered) == pytest.approx(-0.8)
+
+
 def test_compute_dsem_contradiction():
     """A clearly contradicting `T_hat` produces a large Dsem."""
     T_emb = np.array([1.0, 0.0, 0.0])

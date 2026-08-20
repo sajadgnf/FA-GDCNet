@@ -32,6 +32,46 @@ from .gdrm import DEFAULT_FVT_THRESHOLD, DiscrepancyFeatures, build_feature_vect
 
 log = logging.getLogger(__name__)
 
+_SARCASM = frozenset({"positive_sarcasm", "negative_sarcasm"})
+
+
+def refine_label_for_polarity_conflict(
+    label: str,
+    confidence: float,
+    proba: np.ndarray,
+    features: DiscrepancyFeatures,
+) -> tuple[str, float]:
+    """Map plain sentiment → sarcasm subtype when T and T̂ polarities conflict.
+
+    Project taxonomy (see ``scripts/proposal_demo.py`` feature templates):
+    - ``positive_sarcasm``: positive caption vs negative description
+    - ``negative_sarcasm``: negative caption vs positive description
+
+    So «ناراحتی» + smiling face → ``negative_sarcasm``, not ``positive_sarcasm``.
+    """
+    p_t = float(features.polarity_T)
+    p_th = float(features.polarity_T_hat)
+    dsen = float(features.Dsen)
+    text_neg, text_pos = p_t <= -0.05, p_t >= 0.05
+    hat_neg, hat_pos = p_th <= -0.15, p_th >= 0.15
+    if text_neg and hat_pos and dsen >= 0.35:
+        target = "negative_sarcasm"
+    elif text_pos and hat_neg and dsen >= 0.35:
+        target = "positive_sarcasm"
+    else:
+        return label, confidence
+
+    if label == target:
+        return label, confidence
+    # Override plain sentiment or the opposite sarcasm subtype.
+    if label not in ("positive", "negative", "neutral") and label not in _SARCASM:
+        return label, confidence
+
+    t_idx = LABELS.index(target)
+    target_p = float(proba[t_idx]) if t_idx < len(proba) else 0.0
+    new_conf = max(target_p, min(confidence + 0.15, 0.85), 0.35)
+    return target, float(min(new_conf, 0.99))
+
 
 @dataclass
 class Prediction:
@@ -81,6 +121,11 @@ class Pipeline:
 
     def features_for(self, text: str, image: Any) -> DiscrepancyFeatures:
         """Compute the GDRM feature vector for one sample."""
+        features, _ = self.features_and_caption(text, image)
+        return features
+
+    def features_and_caption(self, text: str, image: Any) -> tuple[DiscrepancyFeatures, str]:
+        """Return GDRM features plus SmolVLM caption ``T̂`` (for explainability UI)."""
         from .models import (  # lazy
             caption_image,
             embed_image_mclip,
@@ -94,13 +139,19 @@ class Pipeline:
         image_emb_I = embed_image_mclip(self.bundle, image)
         pol_T = polarity_probs(self.bundle, text)
         pol_T_hat = polarity_probs(self.bundle, T_hat)
-        return build_feature_vector(
+        features = build_feature_vector(
             text_emb_T=text_emb_T,
             text_emb_T_hat=text_emb_T_hat,
             image_emb_I=image_emb_I,
             polarity_probs_T=pol_T,
             polarity_probs_T_hat=pol_T_hat,
         )
+        return features, T_hat
+
+    def explain(self, text: str, image: Any) -> tuple[Prediction, DiscrepancyFeatures, str]:
+        """One-pass inference returning prediction, features, and image caption."""
+        features, T_hat = self.features_and_caption(text, image)
+        return self.predict_from_features(features), features, T_hat
 
     def predict_from_features(self, features: DiscrepancyFeatures) -> Prediction:
         """Run the classifier on an already-computed feature vector."""
@@ -108,6 +159,9 @@ class Pipeline:
         idx = int(np.argmax(proba))
         label = LABELS[idx]
         confidence = float(proba[idx])
+        label, confidence = refine_label_for_polarity_conflict(
+            label, confidence, proba, features
+        )
         low_fidelity = bool(features.Fvt < self.fvt_threshold)
         return Prediction(
             label=label,

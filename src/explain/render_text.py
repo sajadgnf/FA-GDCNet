@@ -75,7 +75,7 @@ def _merge_tokens_for_display(
 
 _RTL_BLOCK_STYLE = (
     "direction:rtl;text-align:right;unicode-bidi:plaintext;"
-    "font-family:Tahoma,'Segoe UI',system-ui,sans-serif;line-height:2;"
+    "font-family:Vazir,Tahoma,'Segoe UI',system-ui,sans-serif;line-height:2;"
 )
 
 
@@ -117,7 +117,7 @@ def render_text_heatmap(
             f"background:rgba(255,128,0,{norm:.3f});"
             "padding:0 2px;border-radius:3px;"
             "display:inline;"
-            "font-family:Tahoma,'Segoe UI',system-ui,sans-serif;"
+            "font-family:Vazir,Tahoma,'Segoe UI',system-ui,sans-serif;"
         )
         spans.append(
             f'<bdi dir="rtl" style="{style}" title="score={raw:.4f}">{text}</bdi>'

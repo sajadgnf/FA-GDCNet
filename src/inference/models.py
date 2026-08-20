@@ -390,36 +390,94 @@ def load_captioner_only(
     return _partial_bundle(dev, smolvlm_model=smolvlm, smolvlm_processor=proc)
 
 
+def load_mclip_text_only(
+    *,
+    device: str | None = None,
+    mclip_id: str = DEFAULT_MCLIP_ID,
+) -> BackboneBundle:
+    """Bring up only the M-CLIP text tower.
+
+    Defaults to **CPU**: XLM-Roberta-Large fp16 weights alone are ~1.04 GiB, so
+    the text tower cannot satisfy the ≤1 GiB VRAM budget on GPU. Image / SmolVLM
+    / ParsBERT stages still run on CUDA; the proposal explicitly allows CPU.
+    """
+    # Prefer CPU unless the caller forces a device (e.g. interactive dashboard).
+    dev = "cpu" if device is None else resolve_device(device)
+    use_fp16 = str(dev).startswith("cuda")
+    mclip_text, mclip_tokenizer = _load_mclip_text(mclip_id, device=dev, fp16=use_fp16)
+    assert_frozen(mclip_text)
+    bundle = _partial_bundle(
+        dev,
+        mclip_text=mclip_text,
+        mclip_tokenizer=mclip_tokenizer,
+    )
+    bundle.mclip_embed_dim = _mclip_embed_dim(mclip_text)
+    assert_mclip_embeddings_usable(bundle)
+    return bundle
+
+
+def load_mclip_image_only(
+    *,
+    device: str | None = None,
+    embed_dim: int = 512,
+    with_attention_tower: bool = False,
+) -> BackboneBundle:
+    """Bring up only the CLIP image tower matched to the M-CLIP text embed dim."""
+    dev = resolve_device(device)
+    backend, mclip_image, mclip_proc, attn, attn_proc = _load_mclip_image_encoder(
+        embed_dim, device=dev, fp16=True
+    )
+    if not with_attention_tower and attn is not None:
+        attn, attn_proc = None, None
+    frozen = [mclip_image] + ([attn] if attn is not None else [])
+    assert_frozen(*frozen)
+    bundle = _partial_bundle(
+        dev,
+        mclip_image=mclip_image,
+        mclip_image_processor=mclip_proc,
+    )
+    bundle.mclip_embed_dim = embed_dim
+    bundle.mclip_vision_backend = backend
+    bundle.mclip_image_attn = attn
+    bundle.mclip_image_attn_processor = attn_proc
+    return bundle
+
+
 def load_mclip_only(
     *,
     device: str | None = None,
     mclip_id: str = DEFAULT_MCLIP_ID,
     with_attention_tower: bool = False,
 ) -> BackboneBundle:
-    """Bring up only the M-CLIP text and image towers, for the embedding stage."""
-    dev = resolve_device(device)
-    mclip_text, mclip_tokenizer = _load_mclip_text(mclip_id, device=dev, fp16=True)
-    mclip_dim = _mclip_embed_dim(mclip_text)
-    backend, mclip_image, mclip_proc, attn, attn_proc = _load_mclip_image_encoder(
-        mclip_dim, device=dev, fp16=True
-    )
-    if not with_attention_tower and attn is not None:
-        attn, attn_proc = None, None
-    frozen = [mclip_text, mclip_image] + ([attn] if attn is not None else [])
-    assert_frozen(*frozen)
-    bundle = _partial_bundle(
-        dev,
-        mclip_text=mclip_text,
-        mclip_image=mclip_image,
-        mclip_tokenizer=mclip_tokenizer,
-        mclip_image_processor=mclip_proc,
-    )
-    bundle.mclip_embed_dim = mclip_dim
-    bundle.mclip_vision_backend = backend
-    bundle.mclip_image_attn = attn
-    bundle.mclip_image_attn_processor = attn_proc
-    assert_mclip_embeddings_usable(bundle)
-    return bundle
+    """Bring up both M-CLIP towers (dashboard / interactive use).
+
+    Staged extraction keeps the text tower on CPU and the image tower on CUDA
+    so peak VRAM stays under 1 GiB. This helper still colocates both when a
+    single interactive device is requested.
+    """
+    # Dashboard path: honor explicit/resolved device for both towers.
+    text_device = resolve_device(device)
+    text = load_mclip_text_only(device=text_device, mclip_id=mclip_id)
+    try:
+        image = load_mclip_image_only(
+            device=device,
+            embed_dim=text.mclip_embed_dim,
+            with_attention_tower=with_attention_tower,
+        )
+    except Exception:
+        release(text)
+        raise
+    # Merge into one bundle; drop the temporary image-only shell.
+    text.mclip_image = image.mclip_image
+    text.mclip_image_processor = image.mclip_image_processor
+    text.mclip_vision_backend = image.mclip_vision_backend
+    text.mclip_image_attn = image.mclip_image_attn
+    text.mclip_image_attn_processor = image.mclip_image_attn_processor
+    image.mclip_image = None
+    image.mclip_image_processor = None
+    image.mclip_image_attn = None
+    image.mclip_image_attn_processor = None
+    return text
 
 
 def load_polarity_only(
@@ -602,7 +660,14 @@ def embed_image_mclip(bundle: BackboneBundle, image) -> np.ndarray:
 
 
 def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
-    """Run the ParsBERT polarity classifier on `text` (Persian)."""
+    """Run the ParsBERT polarity classifier on `text` (Persian).
+
+    Always returns a 2-vector ordered as ``(p_negative, p_positive)`` so
+    :func:`inference.gdrm.polarity_scalar` stays ``p_pos - p_neg``.
+
+    HooshvareLab snappfood heads use ``{0: HAPPY, 1: SAD}`` — *not*
+    ``(neg, pos)`` index order — so we remap via ``config.id2label``.
+    """
     import torch
     from torch.nn.functional import softmax
 
@@ -622,4 +687,22 @@ def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
         probs = probs / total
     elif probs.size >= 2:
         probs = np.array([0.5, 0.5], dtype=np.float32)
-    return probs
+    return _canonicalize_polarity_probs(probs, bundle.parsbert_polarity)
+
+
+_POS_LABELS = frozenset({"HAPPY", "POSITIVE", "POS", "GOOD", "LOVE", "POS_LABEL"})
+_NEG_LABELS = frozenset({"SAD", "NEGATIVE", "NEG", "BAD", "ANGRY", "NEG_LABEL"})
+
+
+def _canonicalize_polarity_probs(probs: np.ndarray, model: Any) -> np.ndarray:
+    """Map classifier output to ``(p_neg, p_pos)`` using ``id2label`` when present."""
+    if probs.size < 2:
+        raise ValueError("polarity vector must have at least 2 entries")
+    id2label = getattr(getattr(model, "config", None), "id2label", None) or {}
+    labels = {int(i): str(name).upper() for i, name in id2label.items()}
+    pos_idx = next((i for i, name in labels.items() if name in _POS_LABELS), None)
+    neg_idx = next((i for i, name in labels.items() if name in _NEG_LABELS), None)
+    if pos_idx is not None and neg_idx is not None and pos_idx != neg_idx:
+        return np.array([float(probs[neg_idx]), float(probs[pos_idx])], dtype=np.float32)
+    # Fallback for unlabeled heads: legacy assumption (neg, pos) by index.
+    return np.asarray(probs[:2], dtype=np.float32)
