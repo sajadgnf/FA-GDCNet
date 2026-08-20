@@ -12,7 +12,9 @@ module.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -25,15 +27,22 @@ from .smolvlm_check import (
 )
 
 DEFAULT_SMOLVLM_ID = "HuggingFaceTB/SmolVLM-256M-Instruct"
-# Pairs with a 640-d CLIP space (RN50x4 via open_clip). Do not use vit-b/32 (512-d) here.
-DEFAULT_MCLIP_ID = "M-CLIP/M-BERT-Distil-40"
+# Emits a 512-d embedding aligned with OpenAI CLIP ViT-B/32's image tower.
+DEFAULT_MCLIP_ID = "M-CLIP/XLM-Roberta-Large-Vit-B-32"
 DEFAULT_PARSBERT_POLARITY_ID = "HooshvareLab/bert-fa-base-uncased-sentiment-snappfood"
 
-# (model_base, transformer_hidden, mclip_projection_dim) per HF M-CLIP model cards.
-_MCLIP_CONFIGS: dict[str, tuple[str, int, int]] = {
-    "M-CLIP/M-BERT-Distil-40": ("distilbert-base-multilingual-cased", 768, 640),
-    "M-CLIP/M-BERT-Base-ViT-B": ("bert-base-multilingual-cased", 768, 640),
-}
+# Legacy M-CLIP repos hold a bare transformer; their CLIP projection head ships
+# separately as a pickle and is only loadable via `legacy_multilingual_clip`.
+# Loading them through `pt_multilingual_clip` silently yields random weights.
+_LEGACY_MCLIP_IDS: frozenset[str] = frozenset(
+    {
+        "M-CLIP/M-BERT-Distil-40",
+        "M-CLIP/M-BERT-Base-ViT-B",
+        "M-CLIP/M-BERT-Base-69",
+        "M-CLIP/Swedish-500k",
+        "M-CLIP/Swedish-2M",
+    }
+)
 
 _TRANSFORMERS_CLIP_BY_DIM: dict[int, str] = {
     512: "openai/clip-vit-base-patch32",
@@ -107,38 +116,117 @@ def _mclip_embed_dim(mclip_text: Any) -> int:
     return int(mclip_text.LinearTransformation.out_features)
 
 
-def _load_mclip_text(mclip_id: str, *, device: str) -> Any:
-    from multilingual_clip import Config_MCLIP
+def _resolve_mclip_source(mclip_id: str) -> str:
+    """Prefer a pre-fetched local copy so runs work on a flaky connection.
+
+    Populated by `scripts/fetch_mclip.py`; falls back to the Hub id.
+    """
+    local = Path("models") / mclip_id.replace("/", "--")
+    if (local / "config.json").is_file() and (local / "pytorch_model.bin").is_file():
+        return str(local)
+    return mclip_id
+
+
+@contextmanager
+def _base_model_from_config_only():
+    """Skip the redundant base-model weight download inside `MultilingualCLIP`.
+
+    `MultilingualCLIP.__init__` calls `AutoModel.from_pretrained(modelBase)`,
+    pulling a second multi-GB checkpoint whose weights are then fully overwritten
+    by the M-CLIP state dict. Building the base from its config alone avoids the
+    download; `_assert_mclip_weights_loaded` verifies nothing is left unfilled.
+    """
+    import transformers
+
+    original = transformers.AutoModel.from_pretrained
+
+    def from_config_instead(name_or_path, *args, **kwargs):
+        config = transformers.AutoConfig.from_pretrained(name_or_path)
+        return transformers.AutoModel.from_config(config)
+
+    transformers.AutoModel.from_pretrained = from_config_instead
+    try:
+        yield
+    finally:
+        transformers.AutoModel.from_pretrained = original
+
+
+def _cuda_gc() -> None:
+    """Best-effort reclaim of CUDA memory between staged loads."""
+    import gc
+
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+
+def _maybe_half(module: Any, *, device: str) -> Any:
+    import torch
+
+    if str(device).startswith("cuda"):
+        return module.half()
+    return module
+
+
+def _load_mclip_text(mclip_id: str, *, device: str, fp16: bool = True) -> Any:
     from multilingual_clip import pt_multilingual_clip
     from transformers import AutoTokenizer
 
-    if mclip_id in _MCLIP_CONFIGS:
-        model_base, transformer_dim, image_dim = _MCLIP_CONFIGS[mclip_id]
-        config = Config_MCLIP.MCLIPConfig(
-            modelBase=model_base,
-            transformerDimSize=transformer_dim,
-            imageDimSize=image_dim,
+    if mclip_id in _LEGACY_MCLIP_IDS:
+        raise RuntimeError(
+            f"{mclip_id!r} is a legacy M-CLIP repo that ships only a bare transformer; "
+            f"its CLIP projection head is a separate pickle. Loading it here would "
+            f"produce random weights and all-zero embeddings. "
+            f"Use {DEFAULT_MCLIP_ID!r} instead."
         )
-        mclip_text = pt_multilingual_clip.MultilingualCLIP.from_pretrained(mclip_id, config=config)
-    else:
-        mclip_text = pt_multilingual_clip.MultilingualCLIP.from_pretrained(mclip_id)
+
+    source = _resolve_mclip_source(mclip_id)
+    with _base_model_from_config_only():
+        mclip_text, loading_info = pt_multilingual_clip.MultilingualCLIP.from_pretrained(
+            source, output_loading_info=True
+        )
+    _assert_mclip_weights_loaded(source, loading_info)
     _freeze(mclip_text)
     mclip_text.to(device)
-    tokenizer = AutoTokenizer.from_pretrained(mclip_id)
+    if fp16:
+        mclip_text = _maybe_half(mclip_text, device=device)
+    tokenizer = AutoTokenizer.from_pretrained(source)
     return mclip_text, tokenizer
 
 
+def _assert_mclip_weights_loaded(mclip_id: str, loading_info: dict) -> None:
+    """Fail loudly when the checkpoint did not populate the M-CLIP text tower.
+
+    A silent random init here is invisible downstream: NaN activations get
+    flattened to zero vectors by `_sanitize_embedding`, which turns every GDRM
+    cosine feature into a constant (Dsem == 1.0, Fvt == 0.0).
+    """
+    missing = [k for k in (loading_info.get("missing_keys") or []) if not k.endswith(".position_ids")]
+    if missing:
+        preview = ", ".join(sorted(missing)[:5])
+        raise RuntimeError(
+            f"M-CLIP checkpoint {mclip_id!r} left {len(missing)} weight(s) uninitialized "
+            f"(e.g. {preview}). The text encoder would emit zero vectors. "
+            f"Verify the repo exposes both `transformer.*` and `LinearTransformation.*` tensors."
+        )
+
+
 def _load_mclip_image_encoder(
-    embed_dim: int, *, device: str
+    embed_dim: int, *, device: str, fp16: bool = True
 ) -> tuple[str, Any, Any, Any | None, Any | None]:
     """Return (backend, image_model, processor, attn_model, attn_processor)."""
     import torch
     from transformers import CLIPModel, AutoImageProcessor
 
+    dtype = torch.float16 if fp16 and str(device).startswith("cuda") else torch.float32
+
     if embed_dim in _TRANSFORMERS_CLIP_BY_DIM:
         clip_id = _TRANSFORMERS_CLIP_BY_DIM[embed_dim]
         clip = CLIPModel.from_pretrained(
-            clip_id, torch_dtype=torch.float32, attn_implementation="eager"
+            clip_id, torch_dtype=dtype, attn_implementation="eager"
         )
         proc = AutoImageProcessor.from_pretrained(clip_id)
         _freeze(clip)
@@ -228,10 +316,10 @@ def load_backbones(
         _freeze(smolvlm)
 
     # --- M-CLIP (text + image, matched embedding dimension) ----------------
-    mclip_text, mclip_tokenizer = _load_mclip_text(mclip_id, device=dev)
+    mclip_text, mclip_tokenizer = _load_mclip_text(mclip_id, device=dev, fp16=str(dev).startswith("cuda"))
     mclip_dim = _mclip_embed_dim(mclip_text)
     backend, mclip_image, mclip_image_processor, mclip_attn, mclip_attn_proc = (
-        _load_mclip_image_encoder(mclip_dim, device=dev)
+        _load_mclip_image_encoder(mclip_dim, device=dev, fp16=str(dev).startswith("cuda"))
     )
 
     # --- ParsBERT polarity classifier --------------------------------------
@@ -244,7 +332,7 @@ def load_backbones(
     if mclip_attn is not None:
         frozen.append(mclip_attn)
     assert_frozen(*frozen)
-    return BackboneBundle(
+    bundle = BackboneBundle(
         smolvlm_model=smolvlm,
         smolvlm_processor=smolvlm_proc,
         mclip_text=mclip_text,
@@ -259,6 +347,153 @@ def load_backbones(
         mclip_image_attn=mclip_attn,
         mclip_image_attn_processor=mclip_attn_proc,
     )
+    assert_mclip_embeddings_usable(bundle)
+    return bundle
+
+
+def _partial_bundle(device: str, **fields: Any) -> BackboneBundle:
+    """A bundle with only the backbones one stage needs; the rest stay `None`."""
+    defaults: dict[str, Any] = {
+        "smolvlm_model": None,
+        "smolvlm_processor": None,
+        "mclip_text": None,
+        "mclip_image": None,
+        "mclip_tokenizer": None,
+        "mclip_image_processor": None,
+        "parsbert_polarity": None,
+        "parsbert_tokenizer": None,
+    }
+    defaults.update(fields)
+    return BackboneBundle(device=device, **defaults)
+
+
+def resolve_device(device: str | None = None) -> str:
+    import torch
+
+    return device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def load_captioner_only(
+    *, device: str | None = None, smolvlm_id: str = DEFAULT_SMOLVLM_ID
+) -> BackboneBundle:
+    """Bring up only SmolVLM, for the captioning stage."""
+    import torch
+
+    dev = resolve_device(device)
+    dtype = torch.float16 if str(dev).startswith("cuda") else torch.float32
+    proc, smolvlm = _load_smolvlm_captioner(
+        smolvlm_id, torch_dtype=dtype, device=dev
+    )
+    if not _is_smolvlm_pipeline(smolvlm):
+        _freeze(smolvlm)
+    assert_frozen(smolvlm)
+    return _partial_bundle(dev, smolvlm_model=smolvlm, smolvlm_processor=proc)
+
+
+def load_mclip_only(
+    *,
+    device: str | None = None,
+    mclip_id: str = DEFAULT_MCLIP_ID,
+    with_attention_tower: bool = False,
+) -> BackboneBundle:
+    """Bring up only the M-CLIP text and image towers, for the embedding stage."""
+    dev = resolve_device(device)
+    mclip_text, mclip_tokenizer = _load_mclip_text(mclip_id, device=dev, fp16=True)
+    mclip_dim = _mclip_embed_dim(mclip_text)
+    backend, mclip_image, mclip_proc, attn, attn_proc = _load_mclip_image_encoder(
+        mclip_dim, device=dev, fp16=True
+    )
+    if not with_attention_tower and attn is not None:
+        attn, attn_proc = None, None
+    frozen = [mclip_text, mclip_image] + ([attn] if attn is not None else [])
+    assert_frozen(*frozen)
+    bundle = _partial_bundle(
+        dev,
+        mclip_text=mclip_text,
+        mclip_image=mclip_image,
+        mclip_tokenizer=mclip_tokenizer,
+        mclip_image_processor=mclip_proc,
+    )
+    bundle.mclip_embed_dim = mclip_dim
+    bundle.mclip_vision_backend = backend
+    bundle.mclip_image_attn = attn
+    bundle.mclip_image_attn_processor = attn_proc
+    assert_mclip_embeddings_usable(bundle)
+    return bundle
+
+
+def load_polarity_only(
+    *, device: str | None = None, parsbert_id: str = DEFAULT_PARSBERT_POLARITY_ID
+) -> BackboneBundle:
+    """Bring up only the ParsBERT polarity head, for the sentiment stage."""
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+    dev = resolve_device(device)
+    parsbert = AutoModelForSequenceClassification.from_pretrained(parsbert_id)
+    _freeze(parsbert)
+    parsbert.to(dev)
+    assert_frozen(parsbert)
+    return _partial_bundle(
+        dev,
+        parsbert_polarity=parsbert,
+        parsbert_tokenizer=AutoTokenizer.from_pretrained(parsbert_id),
+    )
+
+
+def release(bundle: BackboneBundle) -> None:
+    """Drop every backbone reference in `bundle` and reclaim the CUDA cache."""
+    import gc
+
+    import torch
+
+    smol = bundle.smolvlm_model
+    if smol is not None:
+        inner = getattr(smol, "model", None)
+        if inner is not None:
+            del inner
+        if hasattr(smol, "destroy"):
+            try:
+                smol.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        del smol
+
+    for name in (
+        "smolvlm_model",
+        "smolvlm_processor",
+        "mclip_text",
+        "mclip_image",
+        "mclip_tokenizer",
+        "mclip_image_processor",
+        "parsbert_polarity",
+        "parsbert_tokenizer",
+        "mclip_image_attn",
+        "mclip_image_attn_processor",
+    ):
+        setattr(bundle, name, None)
+    _cuda_gc()
+
+
+def assert_mclip_embeddings_usable(bundle: BackboneBundle) -> None:
+    """Probe the text tower so degenerate embeddings surface at load time.
+
+    Two distinct sentences must yield finite, non-zero, non-identical vectors.
+    """
+    a = embed_text_mclip(bundle, "این عکس خیلی قشنگ است")
+    b = embed_text_mclip(bundle, "ماشین در خیابان پارک شده بود")
+    for name, vec in (("probe_a", a), ("probe_b", b)):
+        if not np.all(np.isfinite(vec)):
+            raise RuntimeError(f"M-CLIP text embedding {name} is not finite")
+        if float(np.linalg.norm(vec)) == 0.0:
+            raise RuntimeError(
+                f"M-CLIP text embedding {name} is a zero vector; the text tower "
+                f"did not load pretrained weights"
+            )
+    if np.allclose(a, b):
+        raise RuntimeError(
+            "M-CLIP text encoder returned identical embeddings for different "
+            "sentences; the projection head is likely uninitialized"
+        )
 
 
 # --------------- Inference helpers (used by the pipeline) ---------------------

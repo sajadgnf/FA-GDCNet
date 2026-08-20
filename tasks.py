@@ -219,6 +219,15 @@ def cmd_prune_pool(args: argparse.Namespace) -> int:
     return _run("data.prune_pool", *extra)
 
 
+def cmd_extract(args: argparse.Namespace) -> int:
+    extra: list[str] = []
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    for stage in args.stage or []:
+        extra += ["--stage", stage]
+    return _run("inference.stages", *extra)
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     extra: list[str] = []
     if args.dataset:
@@ -230,7 +239,10 @@ def cmd_eval(_: argparse.Namespace) -> int:
     rc = _run("eval.metrics")
     if rc != 0:
         return rc
-    rc = _run("eval.profile")
+    rc = _run("eval.sarcasm")
+    if rc != 0:
+        return rc
+    rc = _run("eval.profile_staged")
     if rc != 0:
         return rc
     rc = _run("eval.ablation")
@@ -240,6 +252,29 @@ def cmd_eval(_: argparse.Namespace) -> int:
     if rc != 0:
         return rc
     return _run("eval.report")
+
+
+def cmd_finish(_: argparse.Namespace) -> int:
+    """Resume staged extraction, train classifier, run full eval suite."""
+    rc = _run("inference.stages")
+    if rc != 0:
+        return rc
+    rc = _run("inference.classifier", "--from-cache")
+    if rc != 0:
+        return rc
+    return cmd_eval(_)
+
+
+def cmd_augment_sarcasm(args: argparse.Namespace) -> int:
+    extra: list[str] = []
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    if args.dry_run:
+        extra.append("--dry-run")
+    return subprocess.call(
+        [sys.executable, str(ROOT / "scripts" / "augment_sarcasm.py"), *extra],
+        cwd=str(ROOT),
+    )
 
 
 def cmd_dashboard(_: argparse.Namespace) -> int:
@@ -415,11 +450,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_boot.set_defaults(func=cmd_bootstrap_labels)
 
+    p_extract = sub.add_parser(
+        "extract",
+        help="Staged feature extraction (one backbone at a time, resumable).",
+    )
+    p_extract.add_argument("--dataset", default=None)
+    p_extract.add_argument(
+        "--stage",
+        action="append",
+        choices=("captions", "mclip", "polarity", "assemble"),
+        help="Run only these stages (repeatable).",
+    )
+    p_extract.set_defaults(func=cmd_extract)
+
     p_train = sub.add_parser("train")
     p_train.add_argument("--dataset", default=None)
     p_train.set_defaults(func=cmd_train)
 
     sub.add_parser("eval").set_defaults(func=cmd_eval)
+
+    sub.add_parser(
+        "finish",
+        help="Resume extraction, train classifier, run eval (proposal metrics).",
+    ).set_defaults(func=cmd_finish)
+
+    p_aug = sub.add_parser(
+        "augment-sarcasm",
+        help="Append weak-labeled sarcasm posts from the raw archive pool.",
+    )
+    p_aug.add_argument("--dataset", default=None)
+    p_aug.add_argument("--dry-run", action="store_true")
+    p_aug.set_defaults(func=cmd_augment_sarcasm)
+
     sub.add_parser("dashboard").set_defaults(func=cmd_dashboard)
     return parser
 
