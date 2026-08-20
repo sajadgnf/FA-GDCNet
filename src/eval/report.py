@@ -186,10 +186,14 @@ def render_report(
         lines.append("## Staged inference profile (peak VRAM per backbone)")
         lines.append("")
         for stage in profile_staged.get("stages", []):
+            device = stage.get("device")
+            device_note = f" [{device}]" if device else ""
             lines.append(
-                f"- `{stage.get('stage')}`: peak **{stage.get('peak_memory_gib', 0.0):.3f} GiB**, "
+                f"- `{stage.get('stage')}`{device_note}: peak **{stage.get('peak_memory_gib', 0.0):.3f} GiB**, "
                 f"median **{stage.get('median_latency_s', 0.0)*1000:.0f} ms**/sample"
             )
+            if stage.get("note"):
+                lines.append(f"  - {stage['note']}")
         lines.append(
             f"- Combined peak (max stage): **{profile_staged.get('peak_memory_gib', 0.0):.3f} GiB**"
         )

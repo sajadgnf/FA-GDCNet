@@ -36,12 +36,14 @@
 
 ## Staged inference profile (peak VRAM per backbone)
 
-- `captions`: peak **0.945 GiB**, median **3404 ms**/sample
-- `mclip`: peak **1.351 GiB**, median **78 ms**/sample
-- `polarity`: peak **0.621 GiB**, median **25 ms**/sample
-- Combined peak (max stage): **1.351 GiB**
-- Staged under_1gib_budget: **NO**
-- Staged median total latency: **3506 ms**/sample
+- `captions`: peak **0.945 GiB**, median **3176 ms**/sample
+- `mclip_text` [cpu]: peak **0.008 GiB**, median **406 ms**/sample
+  - XLM-Roberta-Large text tower runs on CPU; weights alone are ~1.04 GiB in fp16
+- `mclip_image`: peak **0.312 GiB**, median **33 ms**/sample
+- `polarity`: peak **0.621 GiB**, median **17 ms**/sample
+- Combined peak (max stage): **0.945 GiB**
+- Staged under_1gib_budget: **YES**
+- Staged median total latency: **3631 ms**/sample
 
 ## Full pipeline profile (all backbones resident)
 
@@ -63,5 +65,5 @@
 | Training-free backbones | YES (`assert_frozen`) |
 | Binary sarcasm accuracy ≥ 70% (Dsem rule) | **YES** (72.4%) |
 | Multimodal ≥10 pp over unimodal (sarcasm F1) | **YES** (+17.8 pp) |
-| Peak VRAM ≤ 1 GiB (staged) | **NO** (1.35 GiB)
+| Peak VRAM ≤ 1 GiB (staged) | **YES** (0.94 GiB)
 

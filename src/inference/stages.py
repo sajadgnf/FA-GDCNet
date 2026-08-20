@@ -9,10 +9,10 @@ instead of their sum. Each stage appends to a JSONL checkpoint keyed by
 `post_id`, so an interrupted run resumes instead of starting over.
 
 Stages:
-  1. captions   SmolVLM   -> generated description per image
-  2. mclip      mCLIP     -> Dsem, Fvt, cos_TI
-  3. polarity   ParsBERT  -> polarity distributions for T and T_hat
-  4. assemble   (no GPU)  -> artifacts/features.npz
+  1. captions   SmolVLM        -> generated description per image
+  2. mclip      M-CLIP text then image towers (one at a time) -> Dsem, Fvt, cos_TI
+  3. polarity   ParsBERT       -> polarity distributions for T and T_hat
+  4. assemble   (no GPU)       -> artifacts/features.npz
 
 Usage:
     python -m inference.stages                 # run all stages, resuming
@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 DEFAULT_DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 STAGE_DIR = Path("artifacts") / "stages"
 CAPTIONS_JSONL = STAGE_DIR / "captions.jsonl"
+MCLIP_TEXT_JSONL = STAGE_DIR / "mclip_text.jsonl"
 MCLIP_JSONL = STAGE_DIR / "mclip.jsonl"
 POLARITY_JSONL = STAGE_DIR / "polarity.jsonl"
 DEFAULT_FEATURES = Path("artifacts") / "features.npz"
@@ -175,24 +176,61 @@ def stage_captions(records: list[DatasetRecord], *, checkpoint: Path = CAPTIONS_
 # ------------------------------- stage 2 -------------------------------------
 
 
-def stage_mclip(
+def stage_mclip_text(
+    records: list[DatasetRecord],
+    *,
+    checkpoint: Path = MCLIP_TEXT_JSONL,
+    captions: Path = CAPTIONS_JSONL,
+) -> None:
+    """Embed captions with the M-CLIP text tower only (keeps VRAM ≤ one tower)."""
+    from . import models
+
+    generated = _require_captions(records, captions)
+
+    def process(bundle: Any, rec: DatasetRecord) -> dict:
+        emb_T = models.embed_text_mclip(bundle, rec.caption)
+        emb_T_hat = models.embed_text_mclip(bundle, generated[rec.post_id])
+        return {
+            "emb_T": [float(x) for x in emb_T],
+            "emb_T_hat": [float(x) for x in emb_T_hat],
+        }
+
+    _run_stage(
+        name="mclip_text",
+        records=records,
+        checkpoint=checkpoint,
+        # CPU: XLM-R Large fp16 weights alone are ~1.04 GiB (over the VRAM budget).
+        load=lambda: models.load_mclip_text_only(device="cpu"),
+        process=process,
+    )
+
+
+def stage_mclip_image(
     records: list[DatasetRecord],
     *,
     checkpoint: Path = MCLIP_JSONL,
-    captions: Path = CAPTIONS_JSONL,
+    text_checkpoint: Path = MCLIP_TEXT_JSONL,
 ) -> None:
+    """Embed images, then fold with cached text embeddings into Dsem/Fvt/cos_TI."""
     from PIL import Image
 
     from . import models
     from .gdrm import compute_dsem, compute_fvt, cosine_similarity
 
-    generated = _require_captions(records, captions)
+    text_rows = _read_done(text_checkpoint)
+    missing = [r.post_id for r in records if r.post_id not in text_rows]
+    if missing:
+        raise RuntimeError(
+            f"mclip_text stage incomplete: {len(missing)} record(s) missing from "
+            f"{text_checkpoint} (e.g. {missing[:3]}). Run mclip text first."
+        )
 
     def process(bundle: Any, rec: DatasetRecord) -> dict:
+        row = text_rows[rec.post_id]
+        emb_T = np.asarray(row["emb_T"], dtype=np.float32)
+        emb_T_hat = np.asarray(row["emb_T_hat"], dtype=np.float32)
         with Image.open(rec.image_path) as im:
             image = im.convert("RGB")
-        emb_T = models.embed_text_mclip(bundle, rec.caption)
-        emb_T_hat = models.embed_text_mclip(bundle, generated[rec.post_id])
         emb_I = models.embed_image_mclip(bundle, image)
         return {
             "Dsem": compute_dsem(emb_T, emb_T_hat),
@@ -201,12 +239,24 @@ def stage_mclip(
         }
 
     _run_stage(
-        name="mclip",
+        name="mclip_image",
         records=records,
         checkpoint=checkpoint,
-        load=models.load_mclip_only,
+        load=models.load_mclip_image_only,
         process=process,
     )
+
+
+def stage_mclip(
+    records: list[DatasetRecord],
+    *,
+    checkpoint: Path = MCLIP_JSONL,
+    captions: Path = CAPTIONS_JSONL,
+    text_checkpoint: Path = MCLIP_TEXT_JSONL,
+) -> None:
+    """Run M-CLIP as two sequential sub-stages so peak VRAM is one tower."""
+    stage_mclip_text(records, checkpoint=text_checkpoint, captions=captions)
+    stage_mclip_image(records, checkpoint=checkpoint, text_checkpoint=text_checkpoint)
 
 
 # ------------------------------- stage 3 -------------------------------------

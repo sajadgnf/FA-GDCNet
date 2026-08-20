@@ -3,3 +3,13 @@ gatherUsageStats = false
 
 [server]
 runOnSave = true
+enableStaticServing = true
+
+# Cool dark theme only (navy / cyan — no warm accents)
+[theme]
+base = "dark"
+primaryColor = "#38bdf8"
+backgroundColor = "#070b14"
+secondaryBackgroundColor = "#0d1526"
+textColor = "#f1f5f9"
+font = "sans serif"
