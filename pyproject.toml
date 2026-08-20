@@ -49,9 +49,6 @@ browser = [
     "playwright>=1.42",
 ]
 
-[project.scripts]
-fa-gdcnet = "fa_gdcnet_cli:main"
-
 [tool.setuptools]
 package-dir = { "" = "src" }
 

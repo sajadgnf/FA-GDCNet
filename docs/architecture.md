@@ -9,7 +9,7 @@
                                                       │
                                                       ▼
                        ┌──────────────────────────────────────────────────────┐
-                       │  M-CLIP-ViT-B-32 text encoder  (frozen, multilingual) │
+                       │  M-CLIP text encoder (CPU, frozen, multilingual)      │
                        └──────────────────────────────┬───────────────────────┘
                                                       │ mCLIP_text(T)
                                                       ▼
@@ -68,15 +68,17 @@
 
 ## Constraints (enforced in code)
 
-- `inference/models.assert_frozen(...)` is called by `load_backbones` and runs
-  through every backbone to fail loudly if any parameter slipped out of
+- `inference/models.assert_frozen(...)` is called by every loader and runs
+  through each backbone to fail loudly if any parameter slipped out of
   `requires_grad=False` or out of `eval()` mode.
-- `eval/profile.py` records peak VRAM (CUDA) or peak RSS (CPU) and tags the
-  result with `under_1gib_budget = peak_memory_bytes <= 1 GiB`.
-- `eval/metrics.py` footer reports whether sarcasm-class accuracy crosses the
-  70 % hypothesis floor.
-- `eval/report.py` computes the multimodal minus unimodal sarcasm-F1 delta
-  and tags the ≥10 pp improvement hypothesis.
+- **Staged extraction** (`inference/stages.py`) loads one backbone at a time so
+  peak GPU memory tracks the largest single model, not their sum. M-CLIP text
+  runs on **CPU** (XLM-R Large fp16 weights alone exceed 1 GiB VRAM).
+- `eval/profile_staged.py` records per-stage peak VRAM and writes
+  `reports/profile_staged.json` with `under_1gib_budget` (proposal Hypothesis 1).
+- `eval/profile.py` profiles the all-resident dashboard path (higher peak VRAM).
+- `eval/sarcasm.py` reports binary sarcasm accuracy (Dsem rule + LogReg).
+- `eval/report.py` composes the proposal-claims checklist in `reports/REPORT.md`.
 
 ## Module-level rationale
 
@@ -90,10 +92,25 @@
 - **`explain/`** — `rtl.py` and `render_text.py` are pure-Python (testable).
   `rollout.py` has a pure-numpy core (`rollout`, `token_scores_from_rollout`)
   with thin torch-dependent helpers around it.
-- **`eval/`** — every script reuses the pre-computed feature cache so the
-  heavy backbones are run **once** (during `tasks.py train`); the
-  metrics / ablation / baseline / profile scripts then load `artifacts/*.npz`
-  and finish in seconds on a laptop.
+- **`eval/`** — metrics, ablation, baseline, and report scripts reuse
+  `artifacts/features.npz` when available. Feature extraction runs once via
+  `python tasks.py extract` (staged, resumable); eval finishes in seconds.
+
+## Staged feature extraction
+
+`inference/stages.py` runs four steps with JSONL checkpoints under
+`artifacts/stages/`:
+
+| Stage | Backbone | Device | Output |
+| --- | --- | --- | --- |
+| `captions` | SmolVLM-256M | CUDA | generated description `T̂` per post |
+| `mclip` (text) | M-CLIP text tower | CPU | text embeddings for `T` and `T̂` |
+| `mclip` (image) | CLIP ViT-B/32 vision | CUDA | `Dsem`, `Fvt`, `cos_TI` |
+| `polarity` | ParsBERT | CUDA | polarity vectors for `T` and `T̂` |
+| `assemble` | (none) | — | `artifacts/features.npz` |
+
+Re-run `python tasks.py extract` safely: each stage skips records already in its
+checkpoint file. `python tasks.py finish` runs extract → train → full eval.
 
 ## Data flow during a single dashboard query
 
@@ -133,7 +150,8 @@ backbones. It stores one row per sample:
 | --- | --- |
 | Inference on a coherent positive post | `inference/pipeline.py::Pipeline.predict` |
 | Inference on a sarcastic post with contradicting modalities | same |
-| VRAM budget compliance | `eval/profile.py` writes `under_1gib_budget` |
+| VRAM budget compliance (staged) | `eval/profile_staged.py` → `under_1gib_budget` |
+| VRAM budget (all resident) | `eval/profile.py` → `under_1gib_budget` |
 | Frozen backbone guarantee | `inference/models.py::assert_frozen` |
 | Computing semantic discrepancy Dsem | `inference/gdrm.py::compute_dsem` |
 | Computing sentiment discrepancy Dsen | `inference/gdrm.py::compute_dsen` |
@@ -149,8 +167,8 @@ backbones. It stores one row per sample:
 | Image-side attention map | `explain/rollout.py::attention_from_image` |
 | Text heatmap rendering | `explain/render_text.py::render_text_heatmap` |
 | Image overlay rendering | `explain/render_image.py::overlay` |
-| Joint artifact retrieval | dashboard composes both | 
-| Loading a sample for inspection | `explain/dashboard.py::main` |
+| Joint artifact retrieval | `explain/ui.py` composes both |
+| Loading a sample for inspection | `explain/ui.py::run_dashboard_app` |
 | Low-fidelity warning surface | dashboard banner |
 | Successful scrape under rate limits | `data/scrape.py::main` |
 | Idempotent re-runs | `data/scrape.py::_existing_shortcodes` |
@@ -166,7 +184,7 @@ backbones. It stores one row per sample:
 | Meeting the accuracy hypothesis | `metrics.py` footer rows |
 | Profiling on CUDA backend | `eval/profile.py::_measure_cuda` |
 | Profiling on CPU backend | `eval/profile.py::_measure_cpu` |
-| VRAM hypothesis check | `under_1gib_budget` field |
+| VRAM hypothesis check (staged) | `profile_staged.json` → `under_1gib_budget` |
 | Single-signal and pairwise runs | `eval/ablation.py::run` |
 | Reporting ablation results | `ablation.py::write_csv` + `write_png` |
 | Baseline run | `eval/baseline.py::evaluate` |
