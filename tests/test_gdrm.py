@@ -85,6 +85,64 @@ def test_canonicalize_snappfood_happy_sad_order():
     assert polarity_scalar(ordered) == pytest.approx(-0.8)
 
 
+def test_lexicon_prior_narahati_is_negative():
+    from inference.models import _lexicon_prior_probs
+
+    prior = _lexicon_prior_probs("ناراحتی")
+    assert prior is not None
+    assert polarity_scalar(prior) < -0.5
+
+
+def test_lexicon_prior_skips_negation():
+    from inference.models import _lexicon_prior_probs
+
+    assert _lexicon_prior_probs("ناراحت نیستم") is None
+
+
+def test_lexicon_contrast_prefers_final_clause():
+    """«ناراحتی بود اما الان خوشحال است» is overall positive, not negative."""
+    from inference.models import _lexicon_prior_probs
+
+    prior = _lexicon_prior_probs("ناراحتی بود اما الان خوشحال است")
+    assert prior is not None
+    assert polarity_scalar(prior) > 0.5
+
+
+def test_lexicon_mixed_without_contrast_returns_none():
+    from inference.models import _lexicon_prior_probs
+
+    assert _lexicon_prior_probs("هم ناراحت هم خوشحال") is None
+
+
+def test_blend_weak_polarity_pulls_toward_lexicon():
+    from inference.models import _apply_lexicon_prior
+
+    weak = np.array([0.535, 0.465], dtype=np.float32)  # ~−0.07 like bare ناراحتی
+    prior = np.array([0.88, 0.12], dtype=np.float32)
+    out = _apply_lexicon_prior(weak, prior)
+    assert polarity_scalar(out) < -0.4
+
+
+def test_blend_conflict_overrides_wrong_happy():
+    """«ناراحت است»-style: model HAPPY, lexicon NEG → must go negative."""
+    from inference.models import _apply_lexicon_prior
+
+    wrong_happy = np.array([0.102, 0.898], dtype=np.float32)  # scalar ≈ +0.80
+    prior = np.array([0.88, 0.12], dtype=np.float32)
+    out = _apply_lexicon_prior(wrong_happy, prior)
+    assert polarity_scalar(out) < -0.4
+
+
+def test_blend_strong_agreeing_model_unchanged():
+    from inference.models import _apply_lexicon_prior
+
+    strong_neg = np.array([0.9, 0.1], dtype=np.float32)
+    prior_neg = np.array([0.88, 0.12], dtype=np.float32)
+    out = _apply_lexicon_prior(strong_neg, prior_neg)
+    assert out[0] == pytest.approx(0.9)
+    assert out[1] == pytest.approx(0.1)
+
+
 def test_compute_dsem_contradiction():
     """A clearly contradicting `T_hat` produces a large Dsem."""
     T_emb = np.array([1.0, 0.0, 0.0])

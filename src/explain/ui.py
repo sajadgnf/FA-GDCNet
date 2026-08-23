@@ -27,7 +27,7 @@ from inference.smolvlm_check import is_smolvlm_pipeline, smolvlm_can_caption
 DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 EXPLAIN_DIR = Path("reports") / "explain"
 FONTS_DIR = Path(__file__).resolve().parents[2] / "static" / "fonts"
-UI_BUILD = "2026-08-20-result-polish2"
+UI_BUILD = "2026-08-23-polarity-agree"
 
 LABEL_FA: dict[str, str] = {
     "positive": "مثبت",
@@ -813,9 +813,10 @@ def _prediction_prose(
     def _text_polarity_phrase(p: float | None) -> str:
         if p is None:
             return "متن از نظر قطبیت مبهم است"
-        if p > 0.15:
+        # Mild scalars still count as polarity (lexicon/model blend can be ~0.4).
+        if p > 0.05:
             return "متن ظاهراً <strong>مثبت</strong> است"
-        if p < -0.15:
+        if p < -0.05:
             return "متن ظاهراً <strong>منفی</strong> است"
         return "متن از نظر قطبیت تقریباً <strong>خنثی</strong> است"
 

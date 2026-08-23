@@ -94,6 +94,46 @@ def test_polarity_conflict_promotes_positive_sarcasm():
     assert label == "positive_sarcasm"
 
 
+def test_clear_conflict_from_neutral_gets_stronger_confidence():
+    """Laughing face + «ناراحت است» must not stay low-confidence neutral."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.31,
+        Dsen=0.55,
+        Fvt=0.3,
+        cos_TI=0.19,
+        polarity_T=-0.55,
+        polarity_T_hat=0.50,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("neutral")] = 0.258
+    label, conf = refine_label_for_polarity_conflict("neutral", 0.258, proba, feats)
+    assert label == "negative_sarcasm"
+    assert conf >= 0.62
+
+
+def test_polarity_agreement_lifts_neutral_to_positive():
+    """Happy text + smiling description must not stay ~26% neutral."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.29,
+        Dsen=0.22,
+        Fvt=0.30,
+        cos_TI=0.21,
+        polarity_T=0.7153,
+        polarity_T_hat=0.4975,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("neutral")] = 0.259
+    label, conf = refine_label_for_polarity_conflict("neutral", 0.259, proba, feats)
+    assert label == "positive"
+    assert conf >= 0.65
+
+
 def test_predict_from_features_low_fidelity_flag_set_when_fvt_below_tau():
     pack = _make_clf_pack(target_label="neutral")
     pipeline = Pipeline(bundle=_FakeBundle(), clf_pack=pack, fvt_threshold=0.3)

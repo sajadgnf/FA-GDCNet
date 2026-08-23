@@ -12,6 +12,7 @@ module.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -667,6 +668,12 @@ def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
 
     HooshvareLab snappfood heads use ``{0: HAPPY, 1: SAD}`` — *not*
     ``(neg, pos)`` index order — so we remap via ``config.id2label``.
+
+    Snappfood was trained on review-style phrases; bare emotion nouns like
+    «ناراحتی» often score near-neutral, and some third-person forms like
+    «ناراحت است» are confidently mislabeled HAPPY. When the model is weak
+    *or* conflicts with a clear Persian lexicon stem, we blend toward the
+    prior (skipped under negation markers).
     """
     import torch
     from torch.nn.functional import softmax
@@ -687,11 +694,84 @@ def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
         probs = probs / total
     elif probs.size >= 2:
         probs = np.array([0.5, 0.5], dtype=np.float32)
-    return _canonicalize_polarity_probs(probs, bundle.parsbert_polarity)
+    ordered = _canonicalize_polarity_probs(probs, bundle.parsbert_polarity)
+    prior = _lexicon_prior_probs(text)
+    if prior is not None:
+        ordered = _apply_lexicon_prior(ordered, prior)
+    return ordered
 
 
 _POS_LABELS = frozenset({"HAPPY", "POSITIVE", "POS", "GOOD", "LOVE", "POS_LABEL"})
 _NEG_LABELS = frozenset({"SAD", "NEGATIVE", "NEG", "BAD", "ANGRY", "NEG_LABEL"})
+
+# Snappfood under-scores / mislabels some emotion stems; blend when weak or conflicting.
+_POLARITY_WEAK_SCALAR = 0.25
+_LEXICON_BLEND_WEIGHT = 0.65
+_LEXICON_CONFLICT_BLEND_WEIGHT = 0.85
+
+_NEGATION_MARKERS: tuple[str, ...] = (
+    "نیست",
+    "نیستم",
+    "نیستی",
+    "نیستید",
+    "نیستند",
+    "نمی",
+    "نمی‌",
+    "بدون",
+)
+
+# Final clause after these markers carries the asserted polarity.
+_CONTRAST_RE = re.compile(r"(?:^|[\s،,؛;])(اما|ولی|لیکن)(?=[\s،,؛;]|$)")
+
+# Longest-first matching; keep stems ≥3 letters to limit false hits.
+_LEXICON_NEG_STEMS: tuple[str, ...] = (
+    "ناراحت",
+    "غمگین",
+    "افسرده",
+    "بدبخت",
+    "عصبانی",
+    "خشمگین",
+    "متنفر",
+    "بیزار",
+    "وحشتناک",
+    "افتضاح",
+    "دردناک",
+    "نگران",
+    "مضطرب",
+    "ناامید",
+    "دلشکسته",
+    "دلخور",
+    "پشیمان",
+    "شرمنده",
+    "تنهایی",
+    "اندوه",
+    "مصیبت",
+    "فاجعه",
+    "نفرت",
+    "گریه",
+)
+
+_LEXICON_POS_STEMS: tuple[str, ...] = (
+    "خوشحال",
+    "شادمان",
+    "فوق‌العاده",
+    "فوق العاده",
+    "امیدوار",
+    "راضی",
+    "عاشق",
+    "ممنون",
+    "متشکر",
+    "شادی",
+    "لذت",
+    "هیجان",
+    "درخشان",
+    "موفق",
+    "عالی",
+    "زیبا",
+    "قشنگ",
+    "خفن",
+    "باحال",
+)
 
 
 def _canonicalize_polarity_probs(probs: np.ndarray, model: Any) -> np.ndarray:
@@ -706,3 +786,90 @@ def _canonicalize_polarity_probs(probs: np.ndarray, model: Any) -> np.ndarray:
         return np.array([float(probs[neg_idx]), float(probs[pos_idx])], dtype=np.float32)
     # Fallback for unlabeled heads: legacy assumption (neg, pos) by index.
     return np.asarray(probs[:2], dtype=np.float32)
+
+
+def _contrast_focus(text: str) -> str:
+    """Return the clause after the last اما/ولی/لیکن, else the full text."""
+    matches = list(_CONTRAST_RE.finditer(text))
+    if not matches:
+        return text
+    tail = text[matches[-1].end() :].strip()
+    return tail or text
+
+
+def _lexicon_stem_hits(span: str) -> list[tuple[int, int, str]]:
+    """Collect ``(start, end, 'neg'|'pos')`` hits; longer stems preferred at ties."""
+    hits: list[tuple[int, int, str]] = []
+    for polarity, stems in (("neg", _LEXICON_NEG_STEMS), ("pos", _LEXICON_POS_STEMS)):
+        for stem in sorted(stems, key=len, reverse=True):
+            start = 0
+            while True:
+                i = span.find(stem, start)
+                if i < 0:
+                    break
+                hits.append((i, i + len(stem), polarity))
+                start = i + 1
+    return hits
+
+
+def _lexicon_prior_probs(text: str) -> np.ndarray | None:
+    """Return ``(p_neg, p_pos)`` prior if a clear emotion stem is present.
+
+    Contrastive captions («… اما الان خوشحال است») use the *final* clause.
+    Mixed polarity with no contrast marker leaves the model alone.
+    """
+    from data.preprocess import normalize_persian
+
+    t = normalize_persian(text or "").strip()
+    if not t:
+        return None
+    if any(m in t for m in _NEGATION_MARKERS):
+        return None
+
+    focus = _contrast_focus(t)
+    hits = _lexicon_stem_hits(focus)
+    used_contrast = focus != t
+    if not hits and used_contrast:
+        hits = _lexicon_stem_hits(t)
+        used_contrast = False
+    if not hits:
+        return None
+
+    polarities = {p for _, _, p in hits}
+    if len(polarities) > 1 and not used_contrast:
+        # e.g. «هم ناراحت هم خوشحال» — don't override the classifier.
+        return None
+
+    # Rightmost stem wins (asserted / current emotion).
+    _start, _end, polarity = max(hits, key=lambda h: (h[1], h[1] - h[0]))
+    if polarity == "neg":
+        return np.array([0.88, 0.12], dtype=np.float32)
+    return np.array([0.12, 0.88], dtype=np.float32)
+
+
+def _apply_lexicon_prior(model_probs: np.ndarray, prior: np.ndarray) -> np.ndarray:
+    """Blend lexicon prior when the model is weak or disagrees with the stem.
+
+    Confident agreeing predictions are left alone. Confident *wrong* ones
+    (e.g. HAPPY on «ناراحت است») are pulled hard toward the prior.
+    """
+    from .gdrm import polarity_scalar
+
+    model = np.asarray(model_probs, dtype=np.float32)
+    prior_arr = np.asarray(prior, dtype=np.float32)
+    m_s = float(polarity_scalar(model))
+    p_s = float(polarity_scalar(prior_arr))
+    conflict = m_s * p_s < 0.0
+    weak = abs(m_s) < _POLARITY_WEAK_SCALAR
+    if not conflict and not weak:
+        return model
+    w = _LEXICON_CONFLICT_BLEND_WEIGHT if conflict else _LEXICON_BLEND_WEIGHT
+    blended = (1.0 - w) * model + w * prior_arr
+    total = float(blended.sum())
+    if total <= 0.0:
+        return model
+    return (blended / total).astype(np.float32)
+
+
+# Back-compat alias used by older tests / callers.
+_blend_weak_polarity = _apply_lexicon_prior
