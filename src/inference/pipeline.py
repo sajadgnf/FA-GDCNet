@@ -33,6 +33,7 @@ from .gdrm import DEFAULT_FVT_THRESHOLD, DiscrepancyFeatures, build_feature_vect
 log = logging.getLogger(__name__)
 
 _SARCASM = frozenset({"positive_sarcasm", "negative_sarcasm"})
+_PLAIN = frozenset({"positive", "negative", "neutral"})
 
 
 def refine_label_for_polarity_conflict(
@@ -41,35 +42,65 @@ def refine_label_for_polarity_conflict(
     proba: np.ndarray,
     features: DiscrepancyFeatures,
 ) -> tuple[str, float]:
-    """Map plain sentiment → sarcasm subtype when T and T̂ polarities conflict.
+    """Adjust the classifier label using T / T̂ polarity signals.
+
+    1. Opposite polarities + enough Dsen → sarcasm subtype.
+    2. Aligned clear polarities → plain positive/negative (lifts weak «neutral»).
 
     Project taxonomy (see ``scripts/proposal_demo.py`` feature templates):
     - ``positive_sarcasm``: positive caption vs negative description
     - ``negative_sarcasm``: negative caption vs positive description
-
-    So «ناراحتی» + smiling face → ``negative_sarcasm``, not ``positive_sarcasm``.
     """
     p_t = float(features.polarity_T)
     p_th = float(features.polarity_T_hat)
     dsen = float(features.Dsen)
     text_neg, text_pos = p_t <= -0.05, p_t >= 0.05
     hat_neg, hat_pos = p_th <= -0.15, p_th >= 0.15
-    if text_neg and hat_pos and dsen >= 0.35:
+
+    # ---- conflict → sarcasm -------------------------------------------------
+    dsen_conflict = dsen >= 0.25
+    target: str | None = None
+    if text_neg and hat_pos and dsen_conflict:
         target = "negative_sarcasm"
-    elif text_pos and hat_neg and dsen >= 0.35:
+    elif text_pos and hat_neg and dsen_conflict:
         target = "positive_sarcasm"
+
+    if target is not None:
+        if label == target:
+            return label, confidence
+        if label not in _PLAIN and label not in _SARCASM:
+            return label, confidence
+        t_idx = LABELS.index(target)
+        target_p = float(proba[t_idx]) if t_idx < len(proba) else 0.0
+        new_conf = max(target_p, min(confidence + 0.15, 0.85), 0.35)
+        if abs(p_t) >= 0.35 and abs(p_th) >= 0.35:
+            new_conf = max(new_conf, 0.62)
+        elif abs(p_t) >= 0.2 and abs(p_th) >= 0.25:
+            new_conf = max(new_conf, 0.50)
+        return target, float(min(new_conf, 0.99))
+
+    # ---- agreement → plain sentiment (don't leave ~25% neutral) ------------
+    # Low Dsen + same-sign polarity: caption and description agree.
+    agree_pos = p_t >= 0.35 and p_th >= 0.25 and dsen <= 0.40
+    agree_neg = p_t <= -0.35 and p_th <= -0.25 and dsen <= 0.40
+    if agree_pos:
+        target = "positive"
+    elif agree_neg:
+        target = "negative"
     else:
         return label, confidence
 
     if label == target:
-        return label, confidence
-    # Override plain sentiment or the opposite sarcasm subtype.
-    if label not in ("positive", "negative", "neutral") and label not in _SARCASM:
+        return label, float(max(confidence, 0.55))
+    # Only lift weak «neutral» — leave a confident classifier sarcasm alone.
+    if label != "neutral":
         return label, confidence
 
     t_idx = LABELS.index(target)
     target_p = float(proba[t_idx]) if t_idx < len(proba) else 0.0
-    new_conf = max(target_p, min(confidence + 0.15, 0.85), 0.35)
+    new_conf = max(target_p, min(confidence + 0.25, 0.85), 0.55)
+    if abs(p_t) >= 0.55:
+        new_conf = max(new_conf, 0.65)
     return target, float(min(new_conf, 0.99))
 
 
