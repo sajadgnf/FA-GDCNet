@@ -94,14 +94,6 @@ python tasks.py scrape --profiles-file datasets/raw/accounts.txt --max-count 200
 
 اگر اسکرپ ممکن نیست، از `python scripts/proposal_demo.py` برای آزمایش بقیه مراحل استفاده کنید.
 
-### نتایج ارزیابی
-
-پس از `python tasks.py finish` (یا `eval`)، خلاصهٔ ادعاهای پروپوزال در `reports/REPORT.md` نوشته می‌شود.
-
-### نکته حقوقی
-
-این مخزن **هیچ تصویری از اینستاگرام را بازنشر نمی‌کند**. اسکریپت اسکرپ صرفاً برای جمع‌آوری محلی داده برای پژوهش است. تنها بردارهای تعبیه و برچسب‌ها قابل اشتراک‌گذاری عمومی هستند.
-
 </div>
 
 ---
@@ -219,8 +211,3 @@ Tests that exercise the heavy backbones (`tests/test_pipeline.py`, parts of `tes
 | `python tasks.py label` | CLI 5-class annotation tool. |
 | `python tasks.py augment-sarcasm` | Append weak-labeled sarcasm posts from the archive pool. |
 
-See `docs/architecture.md` for the full data flow and `reports/REPORT.md` for the latest proposal-claims checklist.
-
-### License
-
-MIT. Note that **scraped Instagram media must not be redistributed**; only embeddings and labels may be shared.
