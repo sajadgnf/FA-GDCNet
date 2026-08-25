@@ -36,6 +36,32 @@ _SARCASM = frozenset({"positive_sarcasm", "negative_sarcasm"})
 _PLAIN = frozenset({"positive", "negative", "neutral"})
 
 
+def _plain_from_strong_text(p_t: float) -> str | None:
+    if p_t <= -0.35:
+        return "negative"
+    if p_t >= 0.35:
+        return "positive"
+    return None
+
+
+def _promote_confidence(
+    *,
+    confidence: float,
+    proba: np.ndarray,
+    target: str,
+    floor: float,
+    bump: float = 0.25,
+    strong_floor: float | None = None,
+    p_t: float = 0.0,
+) -> float:
+    t_idx = LABELS.index(target)
+    target_p = float(proba[t_idx]) if t_idx < len(proba) else 0.0
+    new_conf = max(target_p, min(confidence + bump, 0.85), floor)
+    if strong_floor is not None and abs(p_t) >= 0.55:
+        new_conf = max(new_conf, strong_floor)
+    return float(min(new_conf, 0.99))
+
+
 def refine_label_for_polarity_conflict(
     label: str,
     confidence: float,
@@ -45,7 +71,8 @@ def refine_label_for_polarity_conflict(
     """Adjust the classifier label using T / T̂ polarity signals.
 
     1. Opposite polarities + enough Dsen → sarcasm subtype.
-    2. Aligned clear polarities → plain positive/negative (lifts weak «neutral»).
+    2. Sarcasm without a *clear* opposite T̂ polarity → plain sentiment from T.
+    3. Aligned clear polarities → plain positive/negative (lifts weak «neutral»).
 
     Project taxonomy (see ``scripts/proposal_demo.py`` feature templates):
     - ``positive_sarcasm``: positive caption vs negative description
@@ -56,9 +83,9 @@ def refine_label_for_polarity_conflict(
     dsen = float(features.Dsen)
     text_neg, text_pos = p_t <= -0.05, p_t >= 0.05
     hat_neg, hat_pos = p_th <= -0.15, p_th >= 0.15
+    dsen_conflict = dsen >= 0.25
 
     # ---- conflict → sarcasm -------------------------------------------------
-    dsen_conflict = dsen >= 0.25
     target: str | None = None
     if text_neg and hat_pos and dsen_conflict:
         target = "negative_sarcasm"
@@ -70,19 +97,41 @@ def refine_label_for_polarity_conflict(
             return label, confidence
         if label not in _PLAIN and label not in _SARCASM:
             return label, confidence
-        t_idx = LABELS.index(target)
-        target_p = float(proba[t_idx]) if t_idx < len(proba) else 0.0
-        new_conf = max(target_p, min(confidence + 0.15, 0.85), 0.35)
+        new_conf = _promote_confidence(
+            confidence=confidence, proba=proba, target=target, floor=0.35, bump=0.15
+        )
         if abs(p_t) >= 0.35 and abs(p_th) >= 0.35:
             new_conf = max(new_conf, 0.62)
         elif abs(p_t) >= 0.2 and abs(p_th) >= 0.25:
             new_conf = max(new_conf, 0.50)
         return target, float(min(new_conf, 0.99))
 
+    # ---- unsupported sarcasm (e.g. sad text + bland VLM caption) ------------
+    # Near-neutral T̂ is not evidence of irony; trust strong caption polarity.
+    if label in _SARCASM:
+        plain = _plain_from_strong_text(p_t)
+        if plain is not None:
+            return plain, _promote_confidence(
+                confidence=confidence,
+                proba=proba,
+                target=plain,
+                floor=0.55,
+                bump=0.2,
+                strong_floor=0.65,
+                p_t=p_t,
+            )
+
     # ---- agreement → plain sentiment (don't leave ~25% neutral) ------------
-    # Low Dsen + same-sign polarity: caption and description agree.
-    agree_pos = p_t >= 0.35 and p_th >= 0.25 and dsen <= 0.40
-    agree_neg = p_t <= -0.35 and p_th <= -0.25 and dsen <= 0.40
+    # Same-sign clear polarities count as agreement even when Dsen is large
+    # from *strength* mismatch (e.g. 0.99 vs 0.50 both positive).
+    agree_pos = p_t >= 0.35 and p_th >= 0.25
+    agree_neg = p_t <= -0.35 and p_th <= -0.25
+    # Strong text + non-opposing (near-neutral) description also aligns.
+    if not agree_pos and p_t >= 0.35 and abs(p_th) < 0.15:
+        agree_pos = True
+    if not agree_neg and p_t <= -0.35 and abs(p_th) < 0.15:
+        agree_neg = True
+
     if agree_pos:
         target = "positive"
     elif agree_neg:
@@ -92,16 +141,18 @@ def refine_label_for_polarity_conflict(
 
     if label == target:
         return label, float(max(confidence, 0.55))
-    # Only lift weak «neutral» — leave a confident classifier sarcasm alone.
     if label != "neutral":
         return label, confidence
 
-    t_idx = LABELS.index(target)
-    target_p = float(proba[t_idx]) if t_idx < len(proba) else 0.0
-    new_conf = max(target_p, min(confidence + 0.25, 0.85), 0.55)
-    if abs(p_t) >= 0.55:
-        new_conf = max(new_conf, 0.65)
-    return target, float(min(new_conf, 0.99))
+    return target, _promote_confidence(
+        confidence=confidence,
+        proba=proba,
+        target=target,
+        floor=0.55,
+        bump=0.25,
+        strong_floor=0.65,
+        p_t=p_t,
+    )
 
 
 @dataclass

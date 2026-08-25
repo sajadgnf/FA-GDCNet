@@ -27,7 +27,7 @@ from inference.smolvlm_check import is_smolvlm_pipeline, smolvlm_can_caption
 DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 EXPLAIN_DIR = Path("reports") / "explain"
 FONTS_DIR = Path(__file__).resolve().parents[2] / "static" / "fonts"
-UI_BUILD = "2026-08-23-polarity-agree"
+UI_BUILD = "2026-08-25-demote-false-sarcasm"
 
 LABEL_FA: dict[str, str] = {
     "positive": "مثبت",
