@@ -752,6 +752,7 @@ _LEXICON_NEG_STEMS: tuple[str, ...] = (
 )
 
 _LEXICON_POS_STEMS: tuple[str, ...] = (
+    "خوشبخت",
     "خوشحال",
     "شادمان",
     "فوق‌العاده",

@@ -38,20 +38,34 @@ def _make_clf_pack(*, target_label: str, confidence: float = 0.81) -> dict:
     }
 
 
-def _make_features(*, fvt: float = 0.7):
+def _make_features(
+    *,
+    fvt: float = 0.7,
+    polarity_probs_T: np.ndarray | None = None,
+    polarity_probs_T_hat: np.ndarray | None = None,
+):
     return build_feature_vector(
         text_emb_T=np.array([1.0, 0.0]),
         text_emb_T_hat=np.array([1.0, 0.0]),
         image_emb_I=np.array([fvt, np.sqrt(max(0.0, 1.0 - fvt * fvt))]),
-        polarity_probs_T=np.array([0.2, 0.8]),
-        polarity_probs_T_hat=np.array([0.2, 0.8]),
+        polarity_probs_T=polarity_probs_T if polarity_probs_T is not None else np.array([0.2, 0.8]),
+        polarity_probs_T_hat=(
+            polarity_probs_T_hat if polarity_probs_T_hat is not None else np.array([0.2, 0.8])
+        ),
     )
 
 
 def test_predict_from_features_returns_argmax_label():
     clf_pack = _make_clf_pack(target_label="positive_sarcasm", confidence=0.81)
     pipeline = Pipeline(bundle=_FakeBundle(), clf_pack=clf_pack)
-    pred = pipeline.predict_from_features(_make_features(fvt=0.7))
+    # Positive caption vs negative description → sarcasm taxonomy holds.
+    pred = pipeline.predict_from_features(
+        _make_features(
+            fvt=0.7,
+            polarity_probs_T=np.array([0.15, 0.85]),
+            polarity_probs_T_hat=np.array([0.85, 0.15]),
+        )
+    )
     assert pred.label == "positive_sarcasm"
     assert pred.confidence == pytest.approx(0.81)
 
@@ -131,6 +145,48 @@ def test_polarity_agreement_lifts_neutral_to_positive():
     proba[LABELS.index("neutral")] = 0.259
     label, conf = refine_label_for_polarity_conflict("neutral", 0.259, proba, feats)
     assert label == "positive"
+    assert conf >= 0.65
+
+
+def test_polarity_agreement_ignores_strength_mismatch_dsen():
+    """«خوشبخت» + smile: both positive; high Dsen from strength only."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.28,
+        Dsen=0.4961,
+        Fvt=0.30,
+        cos_TI=0.22,
+        polarity_T=0.9935,
+        polarity_T_hat=0.4975,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("neutral")] = 0.271
+    label, conf = refine_label_for_polarity_conflict("neutral", 0.271, proba, feats)
+    assert label == "positive"
+    assert conf >= 0.65
+
+
+def test_sad_text_bland_caption_demotes_false_sarcasm():
+    """«من خوردم زمین» + somber photo: VLM near-neutral ≠ positive sarcasm."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.41,
+        Dsen=0.96,
+        Fvt=0.26,
+        cos_TI=0.21,
+        polarity_T=-0.9606,
+        polarity_T_hat=0.0028,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("positive_sarcasm")] = 0.389
+    label, conf = refine_label_for_polarity_conflict(
+        "positive_sarcasm", 0.389, proba, feats
+    )
+    assert label == "negative"
     assert conf >= 0.65
 
 
