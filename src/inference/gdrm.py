@@ -12,11 +12,15 @@ Signals (per spec `multimodal-sentiment`):
 
 Auxiliary features added to the vector:
 - `cos(mCLIP_text(T), mCLIP_image(I))`
-- positive-polarity scalar of `T` and of `T_hat`
+- polarity scalar of `T` (text sentiment head) and of the image
+  (`polarity_T_hat`: CLIP smile-vs-sad, not SmolVLM-caption polarity)
 
-The polarity classifier is assumed to return probabilities for two classes
-(`negative`, `positive`). We define the single-scalar polarity as
-`p[positive] - p[negative]` so it sits in `[-1, +1]`.
+`T̂` still feeds `Dsem` and `Fvt`. SmolVLM-256M captions under the 1 GiB budget
+are often affect-free, so image polarity uses CLIP facial affect instead of
+running the text head on `T̂`.
+
+The polarity vectors are two-class (`negative`, `positive`). The scalar is
+`p[positive] - p[negative]` in `[-1, +1]`.
 """
 
 from __future__ import annotations

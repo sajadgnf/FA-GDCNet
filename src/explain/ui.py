@@ -27,7 +27,7 @@ from inference.smolvlm_check import is_smolvlm_pipeline, smolvlm_can_caption
 DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 EXPLAIN_DIR = Path("reports") / "explain"
 FONTS_DIR = Path(__file__).resolve().parents[2] / "static" / "fonts"
-UI_BUILD = "2026-08-25-demote-false-sarcasm"
+UI_BUILD = "2026-08-27-clash-floor"
 
 LABEL_FA: dict[str, str] = {
     "positive": "مثبت",
@@ -52,16 +52,16 @@ FEATURE_FA: dict[str, str] = {
     "Fvt": "وفاداری تصویر–متن",
     "cos_TI": "شباهت متن–تصویر",
     "polarity_T": "قطبیت متن",
-    "polarity_T_hat": "قطبیت توصیف",
+    "polarity_T_hat": "قطبیت تصویر",
 }
 
 FEATURE_HINT: dict[str, str] = {
-    "Dsem": "فاصلهٔ معنایی متن فارسی و توصیف تصویر",
-    "Dsen": "تضاد قطبیت احساسی متن و توصیف",
+    "Dsem": "فاصلهٔ معنایی متن فارسی و توصیف SmolVLM",
+    "Dsen": "تضاد قطبیت احساسی متن و تصویر (CLIP)",
     "Fvt": "هم‌راستایی تصویر با توصیف SmolVLM",
     "cos_TI": "شباهت کسینوسی متن و تصویر",
     "polarity_T": "امتیاز احساس متن (−۱ تا +۱)",
-    "polarity_T_hat": "امتیاز احساس توصیف تصویر",
+    "polarity_T_hat": "حال چهره در تصویر از CLIP (−۱ تا +۱)، نه قطبیت جملهٔ SmolVLM",
 }
 
 AGENT_CARDS = (
@@ -800,6 +800,26 @@ def _page_css() -> str:
     return _PAGE_CSS.replace("/*VAZIR_FONTS*/", _vazir_font_face_css())
 
 
+def _apply_polarity_contract(
+    label: str,
+    confidence: float,
+    features: dict,
+) -> tuple[str, float]:
+    """Re-apply the clash rule so a stale dashboard result cannot keep false sarcasm."""
+    import numpy as np
+
+    from inference.gdrm import DiscrepancyFeatures
+    from inference.pipeline import refine_label_for_polarity_conflict
+
+    feats = DiscrepancyFeatures(
+        **{name: float(features.get(name, 0.0)) for name in FEATURE_NAMES}
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    if label in LABELS:
+        proba[LABELS.index(label)] = max(float(confidence), 0.05)
+    return refine_label_for_polarity_conflict(label, float(confidence), proba, feats)
+
+
 def _prediction_prose(
     label: str,
     confidence: float,
@@ -813,12 +833,21 @@ def _prediction_prose(
     def _text_polarity_phrase(p: float | None) -> str:
         if p is None:
             return "متن از نظر قطبیت مبهم است"
-        # Mild scalars still count as polarity (lexicon/model blend can be ~0.4).
+        # Mild scalars still count as polarity.
         if p > 0.05:
             return "متن ظاهراً <strong>مثبت</strong> است"
         if p < -0.05:
             return "متن ظاهراً <strong>منفی</strong> است"
         return "متن از نظر قطبیت تقریباً <strong>خنثی</strong> است"
+
+    def _image_polarity_phrase(p: float | None) -> str:
+        if p is None:
+            return "حال تصویر نامشخص است"
+        if p > 0.15:
+            return "تصویر شاد / مثبت است"
+        if p < -0.15:
+            return "تصویر منفی / غمگین است"
+        return "تصویر از نظر احساس تقریباً خنثی است"
 
     templates = {
         "positive": "احساس غالب این پست را <strong>مثبت</strong> تشخیص دادم.",
@@ -827,13 +856,13 @@ def _prediction_prose(
     }
     if label == "positive_sarcasm":
         body = (
-            "نشانه‌های <strong>کنایهٔ مثبت‌نما</strong> دیده می‌شود — "
-            f"{_text_polarity_phrase(polarity_T)}، اما با تصویر یا زمینه هم‌خوان نیست."
+            "نشانه‌های <strong>کنایهٔ مثبت</strong> دیده می‌شود — "
+            f"{_text_polarity_phrase(polarity_T)}، اما {_image_polarity_phrase(polarity_T_hat)}."
         )
     elif label == "negative_sarcasm":
         body = (
-            "نشانه‌های <strong>کنایهٔ منفی‌نما</strong> دیده می‌شود — "
-            f"{_text_polarity_phrase(polarity_T)}، اما با تصویر یا زمینه هم‌خوان نیست."
+            "نشانه‌های <strong>کنایهٔ منفی</strong> دیده می‌شود — "
+            f"{_text_polarity_phrase(polarity_T)}، اما {_image_polarity_phrase(polarity_T_hat)}."
         )
     else:
         body = templates.get(label, f"برچسب پیش‌بینی‌شده: <strong>{html.escape(fa)}</strong>.")
@@ -898,7 +927,7 @@ def _suggestion_chips(index: list[dict]) -> None:
     for lab in LABELS:
         if lab not in by_label:
             continue
-        chips.append(f'<span class="g-chip">نمونهٔ {html.escape(LABEL_FA[lab])}</span>')
+        chips.append(f'<span class="g-chip"> {html.escape(LABEL_FA[lab])}</span>')
     if chips:
         st.markdown(f'<div class="g-chips">{"".join(chips[:5])}</div>', unsafe_allow_html=True)
 
@@ -937,6 +966,9 @@ def run_dashboard_app() -> None:
         initial_sidebar_state="expanded",
     )
     st.markdown(_page_css(), unsafe_allow_html=True)
+    if st.session_state.get("_ui_build") != UI_BUILD:
+        st.session_state["_ui_build"] = UI_BUILD
+        st.session_state.pop("composer_result", None)
 
     with st.sidebar:
         st.markdown('<p class="sb-title">✦ فضای کار</p>', unsafe_allow_html=True)
@@ -1247,9 +1279,12 @@ def _render_result(
     pipeline: Pipeline | None = None,
 ) -> None:
     caption = str(result.get("caption") or "")
-    label = str(result.get("label") or "")
-    confidence = float(result.get("confidence") or 0.0)
     features = result.get("features") or {}
+    label, confidence = _apply_polarity_contract(
+        str(result.get("label") or ""),
+        float(result.get("confidence") or 0.0),
+        features,
+    )
     T_hat = str(result.get("T_hat") or "")
     gold_label = result.get("gold_label")
     post_id = result.get("post_id")
@@ -1311,7 +1346,7 @@ def _render_result(
     if show_attention and post_id and pipeline is not None:
         with st.expander("نقشهٔ توجه متنی و تصویری", expanded=True):
             st.markdown(
-                '<p class="g-section">توجه متنی (ParsBERT)</p>',
+                '<p class="g-section">توجه متنی (سر قطبیت)</p>',
                 unsafe_allow_html=True,
             )
             tokens, scores = attention_from_text(pipeline.bundle, caption)

@@ -26,6 +26,8 @@ DEFAULT_PROFILE_STAGED = Path("reports") / "profile_staged.json"
 DEFAULT_SARCASM = Path("reports") / "sarcasm.csv"
 DEFAULT_BASELINE_SARCASM = Path("reports") / "baseline_sarcasm.csv"
 DEFAULT_ABLATION_PNG = Path("reports") / "ablation.png"
+DEFAULT_ABLATION_CSV = Path("reports") / "ablation.csv"
+DEFAULT_CONFUSION_PNG = Path("reports") / "confusion.png"
 DEFAULT_OUT = Path("reports") / "REPORT.md"
 
 SARCASM_LABELS = ("positive_sarcasm", "negative_sarcasm")
@@ -95,6 +97,27 @@ def _read_sarcasm_mean(rows: list[dict]) -> float:
     return 0.0
 
 
+def _fold_row(rows: list[dict], fold: str) -> dict | None:
+    for r in rows:
+        if str(r.get("fold") or "") == fold:
+            return r
+    return None
+
+
+def _mean_cell(rows: list[dict], key: str) -> str:
+    row = _fold_row(rows, "mean±std")
+    if not row:
+        return ""
+    return str(row.get(key) or "")
+
+
+def _sarcasm_binary_f1(rows: list[dict]) -> str:
+    row = _fold_row(rows, "mean±std")
+    if row and row.get("f1"):
+        return str(row["f1"])
+    return ""
+
+
 def render_report(
     *,
     metrics_csv: Path,
@@ -104,9 +127,12 @@ def render_report(
     sarcasm_csv: Path,
     baseline_sarcasm_csv: Path,
     ablation_png: Path,
+    ablation_csv: Path = DEFAULT_ABLATION_CSV,
+    confusion_png: Path = DEFAULT_CONFUSION_PNG,
 ) -> str:
     metrics = _read_csv(metrics_csv)
     baseline = _read_csv(baseline_csv)
+    ablation_rows = _read_csv(ablation_csv)
     profile = json.loads(profile_json.read_text(encoding="utf-8")) if profile_json.exists() else {}
     profile_staged = (
         json.loads(profile_staged_json.read_text(encoding="utf-8"))
@@ -115,6 +141,10 @@ def render_report(
     )
     sarcasm_rows = _read_csv(sarcasm_csv)
     baseline_sarcasm_rows = _read_csv(baseline_sarcasm_csv)
+
+    dummy_acc = _read_footer_value(metrics, "dummy_majority_accuracy")
+    dummy_f1 = _read_footer_value(metrics, "dummy_majority_macro_f1")
+    n_samples = _read_footer_value(metrics, "n_samples")
 
     lines: list[str] = []
     lines.append("# FA-GDCNet — Final Report")
@@ -131,8 +161,38 @@ def render_report(
             if not fold.isdigit():
                 continue
             lines.append(f"| {r['fold']} | {r.get('accuracy','')} | {r.get('macro_f1','')} |")
+        mean_acc = _mean_cell(metrics, "accuracy")
+        mean_f1 = _mean_cell(metrics, "macro_f1")
+        if mean_acc or mean_f1:
+            lines.append(f"| mean±std | {mean_acc} | {mean_f1} |")
     else:
         lines.append("_metrics.csv not found_")
+    lines.append("")
+    if dummy_acc:
+        lines.append(
+            f"- Majority dummy (same folds): accuracy **{dummy_acc}**, "
+            f"macro-F1 **{dummy_f1 or '—'}**. Lead with macro-F1, not accuracy."
+        )
+        lines.append("")
+
+    if any(_read_footer_value(metrics, f"n_{lbl}") for lbl in LABELS) or n_samples:
+        lines.append("### Label counts (evaluated set)")
+        lines.append("")
+        lines.append("| label | n |")
+        lines.append("| --- | --- |")
+        for lbl in LABELS:
+            lines.append(f"| `{lbl}` | {_read_footer_value(metrics, f'n_{lbl}') or '—'} |")
+        if n_samples:
+            lines.append(f"| **total** | {n_samples} |")
+        lines.append("")
+
+    lines.append("### Per-class F1 (mean±std)")
+    lines.append("")
+    lines.append("| class | F1 |")
+    lines.append("| --- | --- |")
+    for lbl in LABELS:
+        cell = _mean_cell(metrics, f"f1_{lbl}")
+        lines.append(f"| `{lbl}` | {cell or '—'} |")
     lines.append("")
 
     lines.append("## Unimodal ParsBERT baseline (same folds)")
@@ -147,6 +207,10 @@ def render_report(
             if not fold.isdigit():
                 continue
             lines.append(f"| {r['fold']} | {r.get('accuracy','')} | {r.get('macro_f1','')} |")
+        b_acc = _mean_cell(baseline, "accuracy")
+        b_f1 = _mean_cell(baseline, "macro_f1")
+        if b_acc or b_f1:
+            lines.append(f"| mean±std | {b_acc} | {b_f1} |")
     else:
         lines.append("_baseline.csv not found_")
     lines.append("")
@@ -177,7 +241,16 @@ def render_report(
         "- Dsem threshold rule (CV-tuned, interpretable): "
         f"**{_read_footer_value(sarcasm_rows, 'mean_accuracy_dsem_rule') or f'{mm_bin:.4f}'}**"
     )
-    lines.append(f"- LogReg on discrepancy features: see `sarcasm.csv`")
+    logreg_f1 = _sarcasm_binary_f1(sarcasm_rows)
+    logreg_acc = _read_footer_value(sarcasm_rows, "mean_accuracy_logreg")
+    if logreg_acc or logreg_f1:
+        lines.append(
+            "- LogReg on discrepancy features: "
+            + (f"accuracy **{logreg_acc}**" if logreg_acc else "see `sarcasm.csv`")
+            + (f", binary F1 **{logreg_f1}**" if logreg_f1 else "")
+        )
+    else:
+        lines.append("- LogReg on discrepancy features: see `sarcasm.csv`")
     lines.append(f"- Unimodal baseline binary accuracy: **{bs_bin:.4f}**")
     lines.append(f"- Meets ≥70% accuracy (Dsem rule): **{'YES' if bin_passes else 'NO'}**")
     lines.append("")
@@ -221,12 +294,34 @@ def render_report(
         )
         lines.append("")
 
-    if ablation_png.exists():
-        rel = ablation_png.name
+    if confusion_png.exists():
+        lines.append("## Out-of-fold confusion")
+        lines.append("")
+        lines.append(f"![Confusion matrix]({confusion_png.name})")
+        lines.append("")
+
+    if ablation_png.exists() or ablation_rows:
         lines.append("## Ablation")
         lines.append("")
-        lines.append(f"![Ablation Macro-F1]({rel})")
-        lines.append("")
+        if ablation_png.exists():
+            lines.append(f"![Ablation Macro-F1]({ablation_png.name})")
+            lines.append("")
+        if ablation_rows:
+            lines.append("| configuration | n_features | mean_macro_f1 |")
+            lines.append("| --- | --- | --- |")
+            for r in ablation_rows:
+                lines.append(
+                    f"| {r.get('configuration','')} | {r.get('n_features','')} | "
+                    f"{r.get('mean_macro_f1','')} |"
+                )
+            lines.append("")
+            lines.append(
+                "`aux_only` is `cos_TI` + `polarity_T` + `polarity_T_hat`. "
+                "Dsen is partly redundant with those polarities, so core-signal "
+                "deltas can be small. The proposal claim is **multimodal vs unimodal**, "
+                "not Dsen vs aux."
+            )
+            lines.append("")
 
     lines.append("## Proposal claims checklist")
     lines.append("")
@@ -245,6 +340,40 @@ def render_report(
     )
     lines.append("")
 
+    lines.append("## How to read the scores (defense notes)")
+    lines.append("")
+    lines.append(
+        "- **5-class quality** is reported as **macro-F1**, not accuracy. "
+        "The labeled set is imbalanced (most posts are `positive`), so a majority "
+        "dummy can beat overall accuracy while losing the rare classes."
+    )
+    lines.append(
+        "- **Binary Dsem accuracy** is the metric named in Hypothesis 2. "
+        "Sarcasm is the minority class (~12%), so also report binary sarcasm F1; "
+        "high accuracy alone does not mean sarcasm is detected that often."
+    )
+    lines.append(
+        "- **`polarity_T_hat`** in GDRM is **CLIP facial affect** (smile vs sad), "
+        "not the polarity of the SmolVLM sentence. `T̂` still feeds `Dsem` and `Fvt`. "
+        "Original GDCNet scores `T̂` with a text sentiment head; SmolVLM-256M captions "
+        "under a 1 GiB budget are often bland, so CLIP zero-shot smile/sad is the "
+        "visual-affect stand-in (facial cues are a documented substitute when captions "
+        "omit expression)."
+    )
+    lines.append(
+        "- **Sarcasm-subtype F1** is an **upper bound** until the sarcasm gold labels "
+        "are fully hand-reviewed: visual affect informed both the gold rule and `polarity_T_hat`."
+    )
+    lines.append(
+        "- **Neutral F1** is the weakest class (thin captions / ads). It is not the "
+        "sarcasm hypothesis; do not lead with it."
+    )
+    lines.append(
+        "- **Taarof**, honorific mismatches, and purely cultural irony without a "
+        "text–image polarity clash are **out of scope** of the 5-class GDRM contract."
+    )
+    lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
@@ -257,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sarcasm", type=Path, default=DEFAULT_SARCASM)
     parser.add_argument("--baseline-sarcasm", type=Path, default=DEFAULT_BASELINE_SARCASM)
     parser.add_argument("--ablation-png", type=Path, default=DEFAULT_ABLATION_PNG)
+    parser.add_argument("--ablation-csv", type=Path, default=DEFAULT_ABLATION_CSV)
+    parser.add_argument("--confusion", type=Path, default=DEFAULT_CONFUSION_PNG)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -269,6 +400,8 @@ def main(argv: list[str] | None = None) -> int:
         sarcasm_csv=args.sarcasm,
         baseline_sarcasm_csv=args.baseline_sarcasm,
         ablation_png=args.ablation_png,
+        ablation_csv=args.ablation_csv,
+        confusion_png=args.confusion,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(body, encoding="utf-8")

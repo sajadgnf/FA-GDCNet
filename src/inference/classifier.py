@@ -139,6 +139,7 @@ def compute_dataset_features(
         caption_image,
         embed_image_mclip,
         embed_text_mclip,
+        image_polarity_probs,
         load_backbones,
         polarity_probs,
     )
@@ -166,7 +167,7 @@ def compute_dataset_features(
         text_emb_T_hat = embed_text_mclip(bundle, T_hat)
         image_emb_I = embed_image_mclip(bundle, image)
         pol_T = polarity_probs(bundle, rec.caption)
-        pol_T_hat = polarity_probs(bundle, T_hat)
+        pol_T_hat = image_polarity_probs(bundle, image)
 
         from .gdrm import build_feature_vector
 

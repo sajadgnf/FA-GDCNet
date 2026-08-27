@@ -47,15 +47,15 @@ def bootstrap_demo_dataset(n_per_class: int = 12) -> Path:
         "positive": "چه روز زیبایی! خیلی خوشحالم.",
         "negative": "روز بدی بود، خیلی ناراحتم.",
         "neutral": "امروز هوا ابری است.",
-        "positive_sarcasm": "چه روز عالی‌ای! (کنایه: متن مثبت، تصویر منفی)",
-        "negative_sarcasm": "عالی شد! (کنایه: متن منفی ظاهری، تصویر شاد)",
+        "positive_sarcasm": "اگه دوستم داشت می‌موند (کنایه: متن منفی، تصویر شاد)",
+        "negative_sarcasm": "چه روز عالی‌ای! (کنایه: متن مثبت، تصویر منفی)",
     }
     colors = {
         "positive": (40, 180, 80),
         "negative": (180, 40, 40),
         "neutral": (120, 120, 120),
-        "positive_sarcasm": (180, 40, 40),  # image contradicts positive text
-        "negative_sarcasm": (40, 180, 80),
+        "positive_sarcasm": (40, 180, 80),  # happy image vs sad text
+        "negative_sarcasm": (180, 40, 40),  # bleak image vs cheerful text
     }
     records: list[DatasetRecord] = []
     for label in LABELS:
@@ -84,8 +84,8 @@ def _feature_template(label: str, rng: np.random.Generator) -> np.ndarray:
         "positive": dict(Dsem=0.1, Dsen=0.1, Fvt=0.85, cos_TI=0.8, polarity_T=0.7, polarity_T_hat=0.65),
         "negative": dict(Dsem=0.15, Dsen=0.1, Fvt=0.8, cos_TI=0.75, polarity_T=-0.7, polarity_T_hat=-0.65),
         "neutral": dict(Dsem=0.2, Dsen=0.15, Fvt=0.75, cos_TI=0.5, polarity_T=0.05, polarity_T_hat=0.0),
-        "positive_sarcasm": dict(Dsem=0.75, Dsen=0.9, Fvt=0.7, cos_TI=0.2, polarity_T=0.75, polarity_T_hat=-0.6),
-        "negative_sarcasm": dict(Dsem=0.7, Dsen=0.85, Fvt=0.65, cos_TI=0.25, polarity_T=-0.5, polarity_T_hat=0.7),
+        "positive_sarcasm": dict(Dsem=0.7, Dsen=0.85, Fvt=0.65, cos_TI=0.25, polarity_T=-0.5, polarity_T_hat=0.7),
+        "negative_sarcasm": dict(Dsem=0.75, Dsen=0.9, Fvt=0.7, cos_TI=0.2, polarity_T=0.75, polarity_T_hat=-0.6),
     }[label]
     return np.array(
         [base[k] + noise(0.05) for k in FEATURE_NAMES],
@@ -110,9 +110,9 @@ def build_demo_baseline_features(y: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     rng = np.random.default_rng(99)
     X_rows = []
     for label in y:
-        if label in ("positive", "positive_sarcasm"):
+        if label in ("positive", "negative_sarcasm"):
             p = np.array([0.15, 0.85], dtype=np.float32) + rng.normal(0, 0.05, 2)
-        elif label in ("negative", "negative_sarcasm"):
+        elif label in ("negative", "positive_sarcasm"):
             p = np.array([0.85, 0.15], dtype=np.float32) + rng.normal(0, 0.05, 2)
         else:
             p = np.array([0.5, 0.5], dtype=np.float32) + rng.normal(0, 0.05, 2)

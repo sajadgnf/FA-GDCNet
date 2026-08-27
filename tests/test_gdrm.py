@@ -85,62 +85,176 @@ def test_canonicalize_snappfood_happy_sad_order():
     assert polarity_scalar(ordered) == pytest.approx(-0.8)
 
 
-def test_lexicon_prior_narahati_is_negative():
-    from inference.models import _lexicon_prior_probs
+def test_canonicalize_three_class_head_drops_neutral():
+    """A {negative, neutral, positive} head maps to (p_neg, p_pos)."""
+    from inference.models import _canonicalize_polarity_probs
 
-    prior = _lexicon_prior_probs("ناراحتی")
-    assert prior is not None
-    assert polarity_scalar(prior) < -0.5
+    class _M:
+        config = type(
+            "C", (), {"id2label": {0: "negative", 1: "neutral", 2: "positive"}}
+        )()
 
-
-def test_lexicon_prior_skips_negation():
-    from inference.models import _lexicon_prior_probs
-
-    assert _lexicon_prior_probs("ناراحت نیستم") is None
-
-
-def test_lexicon_contrast_prefers_final_clause():
-    """«ناراحتی بود اما الان خوشحال است» is overall positive, not negative."""
-    from inference.models import _lexicon_prior_probs
-
-    prior = _lexicon_prior_probs("ناراحتی بود اما الان خوشحال است")
-    assert prior is not None
-    assert polarity_scalar(prior) > 0.5
+    ordered = _canonicalize_polarity_probs(
+        np.array([0.7, 0.2, 0.1], dtype=np.float32), _M()
+    )
+    assert ordered[0] == pytest.approx(0.7)
+    assert ordered[1] == pytest.approx(0.1)
+    assert polarity_scalar(ordered) == pytest.approx(-0.6)
 
 
-def test_lexicon_mixed_without_contrast_returns_none():
-    from inference.models import _lexicon_prior_probs
+def test_scalar_to_probs_round_trips_through_polarity_scalar():
+    from inference.models import _scalar_to_probs
 
-    assert _lexicon_prior_probs("هم ناراحت هم خوشحال") is None
-
-
-def test_blend_weak_polarity_pulls_toward_lexicon():
-    from inference.models import _apply_lexicon_prior
-
-    weak = np.array([0.535, 0.465], dtype=np.float32)  # ~−0.07 like bare ناراحتی
-    prior = np.array([0.88, 0.12], dtype=np.float32)
-    out = _apply_lexicon_prior(weak, prior)
-    assert polarity_scalar(out) < -0.4
+    for s in (-1.0, -0.42, 0.0, 0.42, 1.0):
+        assert polarity_scalar(_scalar_to_probs(s)) == pytest.approx(s)
 
 
-def test_blend_conflict_overrides_wrong_happy():
-    """«ناراحت است»-style: model HAPPY, lexicon NEG → must go negative."""
-    from inference.models import _apply_lexicon_prior
+def test_negation_detection_uses_function_words():
+    from inference.models import has_negation
 
-    wrong_happy = np.array([0.102, 0.898], dtype=np.float32)  # scalar ≈ +0.80
-    prior = np.array([0.88, 0.12], dtype=np.float32)
-    out = _apply_lexicon_prior(wrong_happy, prior)
-    assert polarity_scalar(out) < -0.4
+    assert has_negation("ناراحت نیستم")
+    assert has_negation("بد نبود")
+    assert has_negation("مشکلی نیست")
+    assert has_negation("کاش نمی‌رفت")
+    # No negation cue — must not trigger on ordinary vocabulary.
+    assert not has_negation("ناراحت است")
+    assert not has_negation("خوشحالم")
+    assert not has_negation("به درک")
+    assert not has_negation("نه تنها خوشحالم")
+    assert has_negation("نه")
+    assert has_negation("بدون امید")
 
 
-def test_blend_strong_agreeing_model_unchanged():
-    from inference.models import _apply_lexicon_prior
+def test_denegate_rewrites_to_affirmative_claim():
+    from inference.models import denegate
 
-    strong_neg = np.array([0.9, 0.1], dtype=np.float32)
-    prior_neg = np.array([0.88, 0.12], dtype=np.float32)
-    out = _apply_lexicon_prior(strong_neg, prior_neg)
-    assert out[0] == pytest.approx(0.9)
-    assert out[1] == pytest.approx(0.1)
+    assert "هستم" in denegate("ناراحت نیستم")
+    assert "بود" in denegate("بد نبود")
+    assert "نمی" not in denegate("کاش نمی‌رفت")
+
+
+def test_contrast_tail_picks_final_clause():
+    from inference.models import contrast_tail
+
+    assert contrast_tail("ناراحتی بود اما الان خوشحال است") == "الان خوشحال است"
+    assert contrast_tail("روز بدی بود ولی شب خوبی داشتم") == "شب خوبی داشتم"
+    assert contrast_tail("اول ناراحت بودم اما بعد خندیدم ولی الان آرامم") == "الان آرامم"
+    # No contrast marker → whole text is the clause.
+    assert contrast_tail("خوشحالم") == "خوشحالم"
+
+
+def test_polarity_probs_flips_negated_clause(monkeypatch):
+    """«ناراحت نیستم» must not inherit the negative score of «ناراحت»."""
+    from inference import models as M
+
+    def fake_head(_bundle, text: str) -> float:
+        return -0.9 if "ناراحت" in text else 0.0
+
+    monkeypatch.setattr(M, "_head_scalar", fake_head)
+    probs = M.polarity_probs(object(), "ناراحت نیستم")
+    assert polarity_scalar(probs) > 0.5
+
+
+def test_polarity_probs_keeps_raw_score_when_denegate_is_noop(monkeypatch):
+    """Captions with no rewriteable cue must not be sign-flipped."""
+    from inference import models as M
+
+    monkeypatch.setattr(M, "_head_scalar", lambda _b, _t: 0.4)
+    probs = M.polarity_probs(object(), "امروز هوا ابری است")
+    assert polarity_scalar(probs) == pytest.approx(0.4)
+
+
+def test_mourning_formula_overrides_false_positive_head(monkeypatch):
+    """«شادروان» must not be scored positive because it contains «شاد»."""
+    from inference import models as M
+
+    monkeypatch.setattr(M, "_head_scalar", lambda _b, _t: 0.47)
+    for caption in (
+        "شادروان",
+        "مرحوم پدرم",
+        "فقید",
+        "انا لله",
+        "خدا بیامرزدش",
+        "روحشون شاد",
+        "به درک",
+        "گور پدرش",
+        "برو بمیر",
+        "RIP",
+        "حال ما خوب است اما تو باور نکن",
+        "زنده‌یاد مادر",
+        "آسمانی شد",
+        "غم آخرتان باشد",
+        "یادش گرامی",
+        "condolences",
+        "به رحمت ایزدی پیوست",
+        "هر هر هر خنده داره؟",
+        "هرهرهر",
+    ):
+        assert polarity_scalar(M.polarity_probs(object(), caption)) < -0.5
+    # Must not fire on ordinary «درک» (reading comprehension).
+    assert polarity_scalar(M.polarity_probs(object(), "درک مطلب سخت است")) == pytest.approx(0.47)
+    # Bare «خنده داره؟» is the idiom, not the mocking laugh.
+    assert polarity_scalar(M.polarity_probs(object(), "خنده داره؟")) == pytest.approx(0.47)
+
+
+def test_polarity_sends_khandun_as_standard_spelling(monkeypatch):
+    from inference import models as M
+
+    seen: list[str] = []
+
+    def fake_head(_bundle, text: str) -> float:
+        seen.append(text)
+        return 0.4
+
+    monkeypatch.setattr(M, "_head_scalar", fake_head)
+    M.polarity_probs(object(), "نبین که خندونم کلا ادم خندونیم")
+    assert seen
+    blob = " ".join(seen)
+    assert "خندون" not in blob
+    assert "نگاه نکن که" in blob
+    assert "میخندم" in blob
+    assert "خندانی هستم" in blob
+
+
+def test_polarity_rewrites_khande_dare_idiom(monkeypatch):
+    from inference import models as M
+
+    seen: list[str] = []
+    monkeypatch.setattr(M, "_head_scalar", lambda _b, t: seen.append(t) or 0.4)
+    M.polarity_probs(object(), "خنده داره؟")
+    assert seen
+    assert "بامزه است" in seen[0]
+    assert "خنده داره" not in seen[0]
+
+
+def test_polarity_probs_weights_contrast_tail(monkeypatch):
+    """The clause after «اما» dominates the caption score."""
+    from inference import models as M
+
+    def fake_head(_bundle, text: str) -> float:
+        # Tail alone is positive; the whole caption reads negative.
+        return 0.9 if text.strip() == "الان خوشحال است" else -0.6
+
+    monkeypatch.setattr(M, "_head_scalar", fake_head)
+    probs = M.polarity_probs(object(), "ناراحتی بود اما الان خوشحال است")
+    assert polarity_scalar(probs) > 0.3
+
+
+def test_polarity_probs_handles_double_contrast(monkeypatch):
+    """The *last* اما/ولی clause is the asserted one."""
+    from inference import models as M
+
+    def fake_head(_bundle, text: str) -> float:
+        t = text.strip()
+        if t == "الان آرامم":
+            return 0.8
+        if t == "اول ناراحت بودم اما بعد خندیدم ولی الان آرامم":
+            return -0.4
+        return -0.2
+
+    monkeypatch.setattr(M, "_head_scalar", fake_head)
+    probs = M.polarity_probs(object(), "اول ناراحت بودم اما بعد خندیدم ولی الان آرامم")
+    assert polarity_scalar(probs) > 0.4
 
 
 def test_compute_dsem_contradiction():
@@ -212,6 +326,24 @@ def test_build_feature_vector_sarcasm_signature():
     assert f.Fvt > 0.9             # but description still describes the image
     assert f.polarity_T > 0.5
     assert f.polarity_T_hat < -0.5
+
+
+def test_clip_style_image_polarity_moves_dsen():
+    """Smile vs sad CLIP vectors must not collapse Dsen the way bland T̂ did."""
+    from data.image_affect import polarity_vector
+
+    sad_text = np.array([0.8, 0.2])
+    smile = np.array(polarity_vector(0.95, 0.05))
+    f = build_feature_vector(
+        text_emb_T=np.array([1.0, 0.0]),
+        text_emb_T_hat=np.array([1.0, 0.0]),
+        image_emb_I=np.array([1.0, 0.0]),
+        polarity_probs_T=sad_text,
+        polarity_probs_T_hat=smile,
+    )
+    assert f.polarity_T < 0
+    assert f.polarity_T_hat > 0.8
+    assert f.Dsen > 1.0
 
 
 def test_default_fvt_threshold_is_documented():
