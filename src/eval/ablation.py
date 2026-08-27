@@ -8,8 +8,9 @@ Re-fits the lightweight classifier on each subset of GDRM signals from the
     {Dsem, Dsen, Fvt}
 
 Auxiliary features (`cos_TI`, `polarity_T`, `polarity_T_hat`) are kept in every
-configuration so the ablation isolates the contribution of the three named
-discrepancy signals (Dsem/Dsen/Fvt) rather than the auxiliary inputs.
+core-signal configuration. An extra `aux_only` row (those three columns, no
+Dsem/Dsen/Fvt) shows how much of the 5-class score already lives in the
+polarities — Dsen is partly redundant with `polarity_T` / `polarity_T_hat`.
 
 Outputs:
 - `reports/ablation.csv` with one row per configuration.
@@ -76,6 +77,16 @@ def _eval(X: np.ndarray, y: np.ndarray) -> tuple[float, float]:
 def run(X: np.ndarray, y: np.ndarray) -> list[dict]:
     aux_idx = _column_idx(AUX_SIGNALS)
     rows: list[dict] = []
+    acc, f1 = _eval(X[:, sorted(aux_idx)], y)
+    rows.append(
+        {
+            "configuration": "aux_only",
+            "n_features": len(aux_idx),
+            "mean_accuracy": acc,
+            "mean_macro_f1": f1,
+        }
+    )
+    log.info("subset=aux_only mean_macro_f1=%.4f", f1)
     for subset in _powerset(CORE_SIGNALS):
         cols = sorted(_column_idx(subset) + aux_idx)
         Xs = X[:, cols]
@@ -107,14 +118,14 @@ def write_png(rows: list[dict], path: Path) -> Path:
     import matplotlib.pyplot as plt  # lazy
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(9.2, 4.2))
     labels = [r["configuration"] for r in rows]
     values = [r["mean_macro_f1"] for r in rows]
     ax.bar(labels, values, color="#1f77b4")
     ax.set_ylabel("Mean Macro-F1 (5-fold)")
-    ax.set_title("FA-GDCNet ablation over Dsem / Dsen / Fvt")
+    ax.set_title("FA-GDCNet ablation: aux polarities vs Dsem / Dsen / Fvt")
     ax.set_ylim(0, max(values) * 1.15 if values else 1)
-    plt.xticks(rotation=20, ha="right")
+    plt.xticks(rotation=28, ha="right")
     plt.tight_layout()
     fig.savefig(path, dpi=140)
     plt.close(fig)

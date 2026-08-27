@@ -3,8 +3,10 @@
 The archive pool (`datasets/raw/archive/sarcasm_unlabeled.jsonl`) holds posts
 collected for irony cues but never manually labeled. We assign:
 
-- `positive_sarcasm` when ParsBERT polarity favours positive
-- `negative_sarcasm` otherwise
+- `positive_sarcasm` when ParsBERT polarity favours *negative* text
+  (sad/bitter words — typically paired with a happy face)
+- `negative_sarcasm` when polarity favours *positive* text
+  (cheerful words — typically paired with a bleak image)
 
 Only records with a readable image and a novel `post_id` are appended.
 """
@@ -59,7 +61,8 @@ def augment(
             continue
 
         probs = polarity_probs(bundle, caption)
-        label = "positive_sarcasm" if float(probs[1]) >= float(probs[0]) else "negative_sarcasm"
+        # New taxonomy: subtype follows image/delivery — neg text → positive_sarcasm.
+        label = "negative_sarcasm" if float(probs[1]) >= float(probs[0]) else "positive_sarcasm"
         added.append(
             DatasetRecord(
                 post_id=post_id,

@@ -10,8 +10,8 @@ instead of their sum. Each stage appends to a JSONL checkpoint keyed by
 
 Stages:
   1. captions   SmolVLM        -> generated description per image
-  2. mclip      M-CLIP text then image towers (one at a time) -> Dsem, Fvt, cos_TI
-  3. polarity   ParsBERT       -> polarity distributions for T and T_hat
+  2.     mclip      M-CLIP text then image towers (one at a time) -> Dsem, Fvt, cos_TI
+  3. polarity   sentiment head on T; CLIP smile/sad for T̂ polarity
   4. assemble   (no GPU)       -> artifacts/features.npz
 
 Usage:
@@ -41,6 +41,7 @@ CAPTIONS_JSONL = STAGE_DIR / "captions.jsonl"
 MCLIP_TEXT_JSONL = STAGE_DIR / "mclip_text.jsonl"
 MCLIP_JSONL = STAGE_DIR / "mclip.jsonl"
 POLARITY_JSONL = STAGE_DIR / "polarity.jsonl"
+AFFECT_JSONL = STAGE_DIR / "image_affect.jsonl"
 DEFAULT_FEATURES = Path("artifacts") / "features.npz"
 
 PROGRESS_EVERY = 25
@@ -308,11 +309,20 @@ def assemble(
     *,
     mclip: Path = MCLIP_JSONL,
     polarity: Path = POLARITY_JSONL,
+    affect: Path = AFFECT_JSONL,
     out: Path = DEFAULT_FEATURES,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Join the stage checkpoints into the canonical `features.npz` cache."""
+    """Join the stage checkpoints into the canonical `features.npz` cache.
+
+    ``polarity_T_hat`` / ``Dsen`` use CLIP smile-vs-sad from ``image_affect.jsonl``
+    when present; SmolVLM-caption polarity is too near-neutral to carry image mood.
+    """
+    from data.image_affect import polarity_vector
+
     m = _read_done(mclip)
     p = _read_done(polarity)
+    a = _read_done(affect)
+    used_clip = 0
 
     X_rows: list[np.ndarray] = []
     y_rows: list[str] = []
@@ -321,17 +331,25 @@ def assemble(
         mr, pr = m.get(rec.post_id), p.get(rec.post_id)
         if mr is None or pr is None:
             continue
+        pol_hat = pr["pol_T_hat"]
+        ar = a.get(rec.post_id)
+        if ar is not None and not ar.get("missing"):
+            pol_hat = polarity_vector(float(ar["pos"]), float(ar["neg"]))
+            used_clip += 1
         feats = DiscrepancyFeatures(
             Dsem=float(mr["Dsem"]),
-            Dsen=float(np.sum(np.abs(np.asarray(pr["pol_T"]) - np.asarray(pr["pol_T_hat"])))),
+            Dsen=float(np.sum(np.abs(np.asarray(pr["pol_T"]) - np.asarray(pol_hat)))),
             Fvt=float(mr["Fvt"]),
             cos_TI=float(mr["cos_TI"]),
             polarity_T=polarity_scalar(pr["pol_T"]),
-            polarity_T_hat=polarity_scalar(pr["pol_T_hat"]),
+            polarity_T_hat=polarity_scalar(pol_hat),
         )
         X_rows.append(feats.as_array())
         y_rows.append(rec.label)
         post_ids.append(rec.post_id)
+
+    if used_clip:
+        log.info("assemble: CLIP image polarity on %d/%d rows", used_clip, len(X_rows))
 
     if not X_rows:
         raise RuntimeError(

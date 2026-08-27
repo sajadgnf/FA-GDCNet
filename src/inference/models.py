@@ -1,4 +1,4 @@
-"""Frozen backbone loaders for SmolVLM-256M, M-CLIP, and ParsBERT.
+"""Frozen backbone loaders for SmolVLM-256M, M-CLIP, and the polarity head.
 
 The loaders enforce the **training-free** spec scenario: every transformer
 backbone is set to `eval()` with `requires_grad=False`. `assert_frozen` is the
@@ -30,7 +30,13 @@ from .smolvlm_check import (
 DEFAULT_SMOLVLM_ID = "HuggingFaceTB/SmolVLM-256M-Instruct"
 # Emits a 512-d embedding aligned with OpenAI CLIP ViT-B/32's image tower.
 DEFAULT_MCLIP_ID = "M-CLIP/XLM-Roberta-Large-Vit-B-32"
-DEFAULT_PARSBERT_POLARITY_ID = "HooshvareLab/bert-fa-base-uncased-sentiment-snappfood"
+# Tweet-trained multilingual sentiment head. The older Persian
+# `sentiment-snappfood` head was fitted on food-delivery reviews and mislabels
+# ordinary captions (bare emotion nouns, mourning euphemisms, dismissive slang);
+# see `scripts/bench_polarity_heads.py` for the head comparison.
+DEFAULT_POLARITY_ID = "cardiffnlp/twitter-xlm-roberta-base-sentiment"
+# Kept as an alias so callers pinning the old keyword argument still work.
+DEFAULT_PARSBERT_POLARITY_ID = DEFAULT_POLARITY_ID
 
 # Legacy M-CLIP repos hold a bare transformer; their CLIP projection head ships
 # separately as a pickle and is only loadable via `legacy_multilingual_clip`.
@@ -64,6 +70,8 @@ class BackboneBundle:
     mclip_image: Any
     mclip_tokenizer: Any
     mclip_image_processor: Any
+    # Sentiment-polarity head (`DEFAULT_POLARITY_ID`). Field names kept for
+    # back-compat; the head is no longer necessarily a ParsBERT checkpoint.
     parsbert_polarity: Any
     parsbert_tokenizer: Any
     device: str
@@ -323,10 +331,11 @@ def load_backbones(
         _load_mclip_image_encoder(mclip_dim, device=dev, fp16=str(dev).startswith("cuda"))
     )
 
-    # --- ParsBERT polarity classifier --------------------------------------
+    # --- Polarity classifier -----------------------------------------------
     parsbert = AutoModelForSequenceClassification.from_pretrained(parsbert_id)
     _freeze(parsbert)
     parsbert.to(dev)
+    _maybe_half(parsbert, device=dev)
     parsbert_tok = AutoTokenizer.from_pretrained(parsbert_id)
 
     frozen = [smolvlm, mclip_text, mclip_image, parsbert]
@@ -484,13 +493,14 @@ def load_mclip_only(
 def load_polarity_only(
     *, device: str | None = None, parsbert_id: str = DEFAULT_PARSBERT_POLARITY_ID
 ) -> BackboneBundle:
-    """Bring up only the ParsBERT polarity head, for the sentiment stage."""
+    """Bring up only the polarity head, for the sentiment stage."""
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     dev = resolve_device(device)
     parsbert = AutoModelForSequenceClassification.from_pretrained(parsbert_id)
     _freeze(parsbert)
     parsbert.to(dev)
+    _maybe_half(parsbert, device=dev)
     assert_frozen(parsbert)
     return _partial_bundle(
         dev,
@@ -579,7 +589,14 @@ def caption_image(bundle: BackboneBundle, image) -> str:
             "role": "user",
             "content": [
                 {"type": "image"},
-                {"type": "text", "text": "Describe this image objectively and concisely."},
+                {
+                    "type": "text",
+                    "text": (
+                        "In one or two sentences, describe this image. "
+                        "State the facial expression explicitly: smiling/laughing, "
+                        "sad/crying/frowning, or neutral."
+                    ),
+                },
             ],
         }
     ]
@@ -590,7 +607,7 @@ def caption_image(bundle: BackboneBundle, image) -> str:
             outputs = model(
                 text=prompt,
                 images=[image],
-                max_new_tokens=48,
+                max_new_tokens=64,
                 return_full_text=False,
             )
         if isinstance(outputs, list) and outputs:
@@ -607,7 +624,7 @@ def caption_image(bundle: BackboneBundle, image) -> str:
             )
         inputs = proc(text=prompt, images=[image], return_tensors="pt").to(bundle.device)
         with torch.no_grad():
-            out = gen_model.generate(**inputs, max_new_tokens=48, do_sample=False)
+            out = gen_model.generate(**inputs, max_new_tokens=64, do_sample=False)
         text = proc.batch_decode(
             out[:, inputs["input_ids"].shape[1] :],
             skip_special_tokens=True,
@@ -660,24 +677,199 @@ def embed_image_mclip(bundle: BackboneBundle, image) -> np.ndarray:
     return _sanitize_embedding(out)
 
 
-def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
-    """Run the ParsBERT polarity classifier on `text` (Persian).
+def _clip_affect_context(bundle: BackboneBundle):
+    """Cache CLIP smile/sad text embeddings on the bundle (one-time)."""
+    cached = getattr(bundle, "_clip_affect", None)
+    if cached is not None:
+        return cached
 
-    Always returns a 2-vector ordered as ``(p_negative, p_positive)`` so
-    :func:`inference.gdrm.polarity_scalar` stays ``p_pos - p_neg``.
+    import torch
+    from transformers import CLIPModel, CLIPProcessor
 
-    HooshvareLab snappfood heads use ``{0: HAPPY, 1: SAD}`` — *not*
-    ``(neg, pos)`` index order — so we remap via ``config.id2label``.
+    from data.image_affect import CLIP_ID, NEG_PROMPTS, POS_PROMPTS
 
-    Snappfood was trained on review-style phrases; bare emotion nouns like
-    «ناراحتی» often score near-neutral, and some third-person forms like
-    «ناراحت است» are confidently mislabeled HAPPY. When the model is weak
-    *or* conflicts with a clear Persian lexicon stem, we blend toward the
-    prior (skipped under negation markers).
+    device = bundle.device
+    if bundle.mclip_vision_backend == "clip" and hasattr(bundle.mclip_image, "get_text_features"):
+        model = bundle.mclip_image
+    else:
+        dtype = torch.float16 if str(device).startswith("cuda") else torch.float32
+        model = CLIPModel.from_pretrained(CLIP_ID, torch_dtype=dtype)
+        _freeze(model)
+        model.to(device)
+
+    proc = CLIPProcessor.from_pretrained(CLIP_ID)
+    prompts = list(POS_PROMPTS) + list(NEG_PROMPTS)
+    text_inputs = proc(text=prompts, return_tensors="pt", padding=True)
+    text_inputs = {k: v.to(device) for k, v in text_inputs.items()}
+    with torch.no_grad():
+        text_emb = model.get_text_features(**text_inputs)
+        text_emb = text_emb / text_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        scale = model.logit_scale.exp().float()
+    ctx = {
+        "model": model,
+        "proc": proc,
+        "text_emb": text_emb,
+        "scale": scale,
+        "n_pos": len(POS_PROMPTS),
+        "device": device,
+    }
+    bundle._clip_affect = ctx  # type: ignore[attr-defined]
+    return ctx
+
+
+def image_polarity_probs(bundle: BackboneBundle, image) -> np.ndarray:
+    """CLIP smile-vs-sad as ``(p_negative, p_positive)`` for ``polarity_T_hat``.
+
+    SmolVLM captions are too bland for image affect, so GDRM uses this CLIP
+    channel as T̂ polarity while T̂ text still feeds Dsem / Fvt.
     """
+    import torch
+
+    from data.image_affect import polarity_vector
+
+    ctx = _clip_affect_context(bundle)
+    model, proc = ctx["model"], ctx["proc"]
+    device, dtype = ctx["device"], next(model.parameters()).dtype
+    inputs = proc(images=image, return_tensors="pt", padding=True)
+    pixel = inputs["pixel_values"].to(device, dtype=dtype)
+    with torch.no_grad():
+        img_emb = model.get_image_features(pixel_values=pixel)
+        img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        sim = img_emb.float() @ ctx["text_emb"].float().T
+        pos_logit = ctx["scale"] * sim[:, : ctx["n_pos"]].mean(dim=1)
+        neg_logit = ctx["scale"] * sim[:, ctx["n_pos"] :].mean(dim=1)
+        two = torch.stack([neg_logit, pos_logit], dim=1).softmax(dim=-1)[0]
+    neg, pos = float(two[0]), float(two[1])
+    return np.asarray(polarity_vector(pos, neg), dtype=np.float64)
+
+
+def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
+    """Score Persian `text` and return ``(p_negative, p_positive)``.
+
+    The vector is symmetric around the signed sentiment scalar, so
+    :func:`inference.gdrm.polarity_scalar` stays ``p_pos - p_neg`` and
+    ``Dsen`` reduces to the absolute difference of the two scalars.
+
+    Two grammatical rewrites wrap the head, because sentiment models trained on
+    review text mishandle both constructions regardless of vocabulary:
+
+    - **negation** («ناراحت نیستم», «بد نبود») — score the de-negated claim and
+      flip the sign, rather than trusting the head on the negated surface form.
+    - **contrast** («… بود اما الان خوشحال است») — weight the clause after
+      اما/ولی/لیکن, which carries the asserted sentiment.
+    - **mourning / fixed formulas** («شادروان», «مرحوم», «خدا بیامرزدش»,
+      «باور نکن», «به درک») — conventional phrases the head misreads
+      (e.g. «شاد» inside «شادروان»).
+
+    Negation and contrast use closed-class function words. The formula list is
+    a short set of frozen idioms, not open sentiment vocabulary.
+    """
+    scalar = _contrast_aware_scalar(bundle, text)
+    return _scalar_to_probs(scalar)
+
+
+_POS_LABELS = frozenset({"HAPPY", "POSITIVE", "POS", "GOOD", "LOVE", "POS_LABEL", "LABEL_2"})
+_NEG_LABELS = frozenset({"SAD", "NEGATIVE", "NEG", "BAD", "ANGRY", "NEG_LABEL", "LABEL_0"})
+
+# Frozen formulas the head systematically misreads. Not a sentiment lexicon:
+# funeral/condolence formulas, dismissive curses, and «I'm fine — don't believe it».
+_FIXED_NEG_RE = re.compile(
+    r"شادروان|مرحوم|فقید|مغفور|زنده‌?\s*یاد|"
+    r"خدا\s*بیامرز|خدا\s*رحمت|طلب\s*مغفرت|"
+    r"روحش(?:ون)?\s*شاد|روانش\s*شاد|"
+    r"تسلیت|تعزیت|ترحیم|فاتحه|خاکسپاری|مجلس\s*ختم|"
+    r"درگذشت|فوت\s*(?:کرد|کرده|نمود|شده)|رخت\s*بست|"
+    r"به\s*رحمت\s*(?:خدا|ایزدی)|انا\s*لله|راجعون|"
+    r"آسمانی\s*شد|دار\s*فانی|غم\s*آخر(?:ت|تان|تون)|"
+    r"خدا\s*صبر|یادش(?:ان)?\s*گرامی|نور\s*به\s*قبر|قرین\s*رحمت|"
+    r"رحمه?\s*الله|رحم[ةه]\s*الله|"
+    r"به\s*درک|گور\s*پدر|برو\s*بمیر|"
+    r"باور\s*نکن|هر\s*هر\s*هر|"
+    r"\bRIP\b|rest\s+in\s+peace|condolences?",
+    re.I,
+)
+_FIXED_NEG_SCALAR = -0.75
+_CONTRAST_TAIL_WEIGHT = 0.75
+# Negation rarely asserts the exact opposite, so damp the flipped score.
+_NEGATION_FLIP = 0.85
+# Below this, the de-negated claim is too vague to justify flipping the sign.
+_NEGATION_MIN_AFFIRMATIVE = 0.5
+
+# Closed-class negation cues (function words, never sentiment vocabulary).
+# Bare «نه» only counts as its own clause (not inside «نه تنها / نه فقط»).
+_NEGATION_RE = re.compile(
+    r"(?:^|\s)(?:نیست\w*|نبود\w*|نباش\w*|نشد\w*|ندار\w*|نمی[\u200c\s]?\w+|هیچ|بدون)"
+    r"(?=\s|$|[،,.!?؛;])"
+    r"|(?:^|\s)نه(?=$|[،,.!?؛;])"
+)
+
+# Rewrites that strip the negative prefix so the head rates the bare claim.
+_DENEGATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"نمی[\u200c\s]?"), "می‌"),
+    (re.compile(r"\bنیستم\b"), "هستم"),
+    (re.compile(r"\bنیستی\b"), "هستی"),
+    (re.compile(r"\bنیستند\b"), "هستند"),
+    (re.compile(r"\bنیست\b"), "است"),
+    (re.compile(r"\bن(بود\w*|شد\w*|دار\w*|باش\w*|کرد\w*|رفت\w*)"), r"\1"),
+    (re.compile(r"(?:^|\s)بدون\s"), " با "),
+    (re.compile(r"(?:^|\s)هیچ\s"), " "),
+)
+
+_CONTRAST_RE = re.compile(r"(?:^|[\s،,؛;])(?:اما|ولی|لیکن)(?=[\s،,؛;]|$)")
+
+# Spoken / clitic forms the frozen head misreads. Applied only on the polarity
+# path (not mCLIP): «نبین که می‌خندم» is the standard wording of the same line.
+_SPOKEN_FOR_POLARITY: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"نبین\s*که"), "نگاه نکن که"),
+    (re.compile(r"خنده[\s\u200c]*داره\s*[؟!?]*"), "بامزه است"),
+    (re.compile(r"خنده[\s\u200c]*دار(?=[\s؟!]|$)"), "بامزه"),
+    (re.compile(r"خندانیم"), "خندانی هستم"),
+    (re.compile(r"خندانم"), "میخندم"),
+)
+
+
+def spoken_for_polarity(text: str) -> str:
+    """Map a few spoken smile-self lines to wording the polarity head knows."""
+    out = text or ""
+    for pattern, repl in _SPOKEN_FOR_POLARITY:
+        out = pattern.sub(repl, out)
+    return out
+
+
+def has_negation(text: str) -> bool:
+    """True if `text` carries an explicit Persian negation cue."""
+    return bool(_NEGATION_RE.search(text or ""))
+
+
+def denegate(text: str) -> str:
+    """Rewrite a negated Persian clause into its affirmative form."""
+    out = text or ""
+    for pattern, repl in _DENEGATION_RULES:
+        out = pattern.sub(repl, out)
+    return re.sub(r"\s+", " ", out).strip()
+
+
+def contrast_tail(text: str) -> str:
+    """Clause after the last اما/ولی/لیکن, or `text` when there is no contrast."""
+    t = text or ""
+    matches = list(_CONTRAST_RE.finditer(t))
+    if not matches:
+        return t
+    return t[matches[-1].end() :].strip() or t
+
+
+def _scalar_to_probs(scalar: float) -> np.ndarray:
+    s = float(np.clip(scalar, -1.0, 1.0))
+    return np.array([(1.0 - s) / 2.0, (1.0 + s) / 2.0], dtype=np.float32)
+
+
+def _head_scalar(bundle: BackboneBundle, text: str) -> float:
+    """Raw signed sentiment of `text` from the frozen head, in ``[-1, +1]``."""
     import torch
     from torch.nn.functional import softmax
 
+    if not (text or "").strip():
+        return 0.0
     inputs = bundle.parsbert_tokenizer(
         text,
         return_tensors="pt",
@@ -687,7 +879,7 @@ def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
     ).to(bundle.device)
     with torch.no_grad():
         logits = bundle.parsbert_polarity(**inputs).logits
-    probs = softmax(logits, dim=-1).cpu().numpy()[0]
+    probs = softmax(logits.float(), dim=-1).cpu().numpy()[0]
     probs = np.nan_to_num(np.asarray(probs, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     total = float(probs.sum())
     if total > 0.0:
@@ -695,88 +887,48 @@ def polarity_probs(bundle: BackboneBundle, text: str) -> np.ndarray:
     elif probs.size >= 2:
         probs = np.array([0.5, 0.5], dtype=np.float32)
     ordered = _canonicalize_polarity_probs(probs, bundle.parsbert_polarity)
-    prior = _lexicon_prior_probs(text)
-    if prior is not None:
-        ordered = _apply_lexicon_prior(ordered, prior)
-    return ordered
+    return float(ordered[1] - ordered[0])
 
 
-_POS_LABELS = frozenset({"HAPPY", "POSITIVE", "POS", "GOOD", "LOVE", "POS_LABEL"})
-_NEG_LABELS = frozenset({"SAD", "NEGATIVE", "NEG", "BAD", "ANGRY", "NEG_LABEL"})
+def _clause_scalar(bundle: BackboneBundle, clause: str) -> float:
+    """Sentiment of one clause, flipping the sign when it is negated."""
+    raw = _head_scalar(bundle, clause)
+    if not has_negation(clause):
+        return raw
+    rewritten = denegate(clause)
+    if rewritten == clause:
+        return raw
+    affirmative = _head_scalar(bundle, rewritten)
+    # A weak affirmative reading means the cue was not scoping sentiment (e.g.
+    # the wish «کاش هیچ‌وقت نمی‌دیدمش»), so keep the head's own reading.
+    if abs(affirmative) < _NEGATION_MIN_AFFIRMATIVE:
+        return raw
+    return -_NEGATION_FLIP * affirmative
 
-# Snappfood under-scores / mislabels some emotion stems; blend when weak or conflicting.
-_POLARITY_WEAK_SCALAR = 0.25
-_LEXICON_BLEND_WEIGHT = 0.65
-_LEXICON_CONFLICT_BLEND_WEIGHT = 0.85
 
-_NEGATION_MARKERS: tuple[str, ...] = (
-    "نیست",
-    "نیستم",
-    "نیستی",
-    "نیستید",
-    "نیستند",
-    "نمی",
-    "نمی‌",
-    "بدون",
-)
+def _contrast_aware_scalar(bundle: BackboneBundle, text: str) -> float:
+    from data.preprocess import normalize_persian
 
-# Final clause after these markers carries the asserted polarity.
-_CONTRAST_RE = re.compile(r"(?:^|[\s،,؛;])(اما|ولی|لیکن)(?=[\s،,؛;]|$)")
-
-# Longest-first matching; keep stems ≥3 letters to limit false hits.
-_LEXICON_NEG_STEMS: tuple[str, ...] = (
-    "ناراحت",
-    "غمگین",
-    "افسرده",
-    "بدبخت",
-    "عصبانی",
-    "خشمگین",
-    "متنفر",
-    "بیزار",
-    "وحشتناک",
-    "افتضاح",
-    "دردناک",
-    "نگران",
-    "مضطرب",
-    "ناامید",
-    "دلشکسته",
-    "دلخور",
-    "پشیمان",
-    "شرمنده",
-    "تنهایی",
-    "اندوه",
-    "مصیبت",
-    "فاجعه",
-    "نفرت",
-    "گریه",
-)
-
-_LEXICON_POS_STEMS: tuple[str, ...] = (
-    "خوشبخت",
-    "خوشحال",
-    "شادمان",
-    "فوق‌العاده",
-    "فوق العاده",
-    "امیدوار",
-    "راضی",
-    "عاشق",
-    "ممنون",
-    "متشکر",
-    "شادی",
-    "لذت",
-    "هیجان",
-    "درخشان",
-    "موفق",
-    "عالی",
-    "زیبا",
-    "قشنگ",
-    "خفن",
-    "باحال",
-)
+    normalized = spoken_for_polarity(normalize_persian(text or "").strip())
+    if not normalized:
+        return 0.0
+    if _FIXED_NEG_RE.search(normalized):
+        return _FIXED_NEG_SCALAR
+    whole = _clause_scalar(bundle, normalized)
+    tail = contrast_tail(normalized)
+    if tail == normalized:
+        return whole
+    w = _CONTRAST_TAIL_WEIGHT
+    return w * _clause_scalar(bundle, tail) + (1.0 - w) * whole
 
 
 def _canonicalize_polarity_probs(probs: np.ndarray, model: Any) -> np.ndarray:
-    """Map classifier output to ``(p_neg, p_pos)`` using ``id2label`` when present."""
+    """Map classifier output to ``(p_neg, p_pos)`` using ``id2label`` when present.
+
+    Heads with a neutral class (e.g. ``{negative, neutral, positive}``) drop the
+    neutral mass, so the returned pair need not sum to 1; the signed difference
+    ``p_pos - p_neg`` is what callers consume.
+    """
     if probs.size < 2:
         raise ValueError("polarity vector must have at least 2 entries")
     id2label = getattr(getattr(model, "config", None), "id2label", None) or {}
@@ -787,90 +939,3 @@ def _canonicalize_polarity_probs(probs: np.ndarray, model: Any) -> np.ndarray:
         return np.array([float(probs[neg_idx]), float(probs[pos_idx])], dtype=np.float32)
     # Fallback for unlabeled heads: legacy assumption (neg, pos) by index.
     return np.asarray(probs[:2], dtype=np.float32)
-
-
-def _contrast_focus(text: str) -> str:
-    """Return the clause after the last اما/ولی/لیکن, else the full text."""
-    matches = list(_CONTRAST_RE.finditer(text))
-    if not matches:
-        return text
-    tail = text[matches[-1].end() :].strip()
-    return tail or text
-
-
-def _lexicon_stem_hits(span: str) -> list[tuple[int, int, str]]:
-    """Collect ``(start, end, 'neg'|'pos')`` hits; longer stems preferred at ties."""
-    hits: list[tuple[int, int, str]] = []
-    for polarity, stems in (("neg", _LEXICON_NEG_STEMS), ("pos", _LEXICON_POS_STEMS)):
-        for stem in sorted(stems, key=len, reverse=True):
-            start = 0
-            while True:
-                i = span.find(stem, start)
-                if i < 0:
-                    break
-                hits.append((i, i + len(stem), polarity))
-                start = i + 1
-    return hits
-
-
-def _lexicon_prior_probs(text: str) -> np.ndarray | None:
-    """Return ``(p_neg, p_pos)`` prior if a clear emotion stem is present.
-
-    Contrastive captions («… اما الان خوشحال است») use the *final* clause.
-    Mixed polarity with no contrast marker leaves the model alone.
-    """
-    from data.preprocess import normalize_persian
-
-    t = normalize_persian(text or "").strip()
-    if not t:
-        return None
-    if any(m in t for m in _NEGATION_MARKERS):
-        return None
-
-    focus = _contrast_focus(t)
-    hits = _lexicon_stem_hits(focus)
-    used_contrast = focus != t
-    if not hits and used_contrast:
-        hits = _lexicon_stem_hits(t)
-        used_contrast = False
-    if not hits:
-        return None
-
-    polarities = {p for _, _, p in hits}
-    if len(polarities) > 1 and not used_contrast:
-        # e.g. «هم ناراحت هم خوشحال» — don't override the classifier.
-        return None
-
-    # Rightmost stem wins (asserted / current emotion).
-    _start, _end, polarity = max(hits, key=lambda h: (h[1], h[1] - h[0]))
-    if polarity == "neg":
-        return np.array([0.88, 0.12], dtype=np.float32)
-    return np.array([0.12, 0.88], dtype=np.float32)
-
-
-def _apply_lexicon_prior(model_probs: np.ndarray, prior: np.ndarray) -> np.ndarray:
-    """Blend lexicon prior when the model is weak or disagrees with the stem.
-
-    Confident agreeing predictions are left alone. Confident *wrong* ones
-    (e.g. HAPPY on «ناراحت است») are pulled hard toward the prior.
-    """
-    from .gdrm import polarity_scalar
-
-    model = np.asarray(model_probs, dtype=np.float32)
-    prior_arr = np.asarray(prior, dtype=np.float32)
-    m_s = float(polarity_scalar(model))
-    p_s = float(polarity_scalar(prior_arr))
-    conflict = m_s * p_s < 0.0
-    weak = abs(m_s) < _POLARITY_WEAK_SCALAR
-    if not conflict and not weak:
-        return model
-    w = _LEXICON_CONFLICT_BLEND_WEIGHT if conflict else _LEXICON_BLEND_WEIGHT
-    blended = (1.0 - w) * model + w * prior_arr
-    total = float(blended.sum())
-    if total <= 0.0:
-        return model
-    return (blended / total).astype(np.float32)
-
-
-# Back-compat alias used by older tests / callers.
-_blend_weak_polarity = _apply_lexicon_prior

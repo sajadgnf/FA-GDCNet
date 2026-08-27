@@ -37,6 +37,8 @@ dependencies = [
     "hazm>=0.10",
     "joblib>=1.3",
     "tqdm>=4.66",
+    # XLM-R sentencepiece tokenizer for the polarity head.
+    "sentencepiece>=0.2",
 ]
 
 [project.optional-dependencies]

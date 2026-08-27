@@ -41,6 +41,13 @@ _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _MENTION_RE = re.compile(r"(?<![\w])@\w+")
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Spoken spellings the frozen polarity head misreads. Orthography only, not
+# sentiment vocabulary: «خندون» is how «خندان» is often typed.
+_COLLOQUIAL_SPELLING: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"خندون"), "خندان"),
+    (re.compile(r"(?<![\u0600-\u06FF])ادم(?![\u0600-\u06FF])"), "آدم"),
+)
+
 # Persian letter range: U+0600 — U+06FF (Arabic block, includes Persian).
 # We exclude digits since they were already normalized to ASCII above.
 _PERSIAN_LETTER_RE = re.compile(r"[\u0600-\u06FF]")
@@ -52,7 +59,10 @@ def normalize_persian(text: str) -> str:
     if not text:
         return ""
     nfc = unicodedata.normalize("NFC", text)
-    return nfc.translate(_TRANSLATION_TABLE)
+    out = nfc.translate(_TRANSLATION_TABLE)
+    for pattern, repl in _COLLOQUIAL_SPELLING:
+        out = pattern.sub(repl, out)
+    return out
 
 
 def strip_noise(text: str) -> str:

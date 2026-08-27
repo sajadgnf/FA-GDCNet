@@ -75,7 +75,7 @@ def token_scores_from_rollout(rollout_matrix: np.ndarray, *, cls_index: int = 0)
 
 
 def attention_from_text(bundle, text: str) -> tuple[list[str], np.ndarray]:
-    """Run ParsBERT on `text` and return (tokens, rollout_token_scores)."""
+    """Run the polarity head on `text` and return (tokens, rollout_token_scores)."""
     import torch  # lazy
 
     tok = bundle.parsbert_tokenizer
@@ -85,8 +85,9 @@ def attention_from_text(bundle, text: str) -> tuple[list[str], np.ndarray]:
             **enc,
             output_attentions=True,
         )
-    # `out.attentions` is a tuple of (1, heads, seq, seq) tensors.
-    layers = [a.squeeze(0).cpu().numpy() for a in out.attentions]
+    # `out.attentions` is a tuple of (1, heads, seq, seq) tensors; the head may
+    # run in fp16, so widen before the rollout matrix products.
+    layers = [a.squeeze(0).float().cpu().numpy() for a in out.attentions]
     matrix = rollout(layers)
     scores = token_scores_from_rollout(matrix, cls_index=0)
     tokens = tok.convert_ids_to_tokens(enc["input_ids"][0].cpu().tolist())

@@ -16,12 +16,12 @@ FA-GDCNet یک خط لوله سبک و **بدون نیاز به آموزش مج�
 
 1. **`SmolVLM-256M`** — تولید توصیف عینی (`T̂`) از تصویر.
 2. **`M-CLIP` (`XLM-Roberta-Large-Vit-B-32`)** — تعبیه متن فارسی و تصویر در یک فضای برداری مشترک.
-3. **`ParsBERT`** — استخراج قطبیت احساسی متن فارسی.
+3. **`twitter-xlm-roberta-base-sentiment`** — استخراج قطبیت احساسی متن فارسی. این سر روی متن شبکه‌های اجتماعی آموزش دیده و برخلاف سرهای مبتنی بر نظرات خرید، عبارت‌های روزمره را درست می‌سنجد. دو بازنویسی دستوری هم روی آن اعمال می‌شود: **نفی** (مثل «ناراحت نیستم») با امتیازدهی به شکل مثبت جمله و سپس قرینه‌کردن علامت، و **تضاد** (مثل «… بود اما الان خوشحال است») با وزن‌دادن به بند پس از «اما / ولی / لیکن». مقایسهٔ سرهای مختلف در `scripts/bench_polarity_heads.py` است.
 
 سپس سه شاخص اختلاف محاسبه می‌شود:
 
 - **Dsem**: فاصله کسینوسی بین متن کاربر `T` و توصیف تولیدشده `T̂` در فضای mCLIP.
-- **Dsen**: تضاد قطبیت احساسی بین `T` و `T̂` با ParsBERT.
+- **Dsen**: تضاد قطبیت احساسی بین متن و **تصویر**. قطبیت متن از سر XLM-R است؛ قطبیت تصویر از CLIP (لبخند در برابر غم)، نه از قطبیت جملهٔ SmolVLM. توصیف `T̂` همچنان برای Dsem و Fvt استفاده می‌شود.
 - **Fvt**: شباهت کسینوسی تصویر با توصیف تولیدشده برای کنترل توهم مدل.
 
 این سه شاخص (به‌همراه چند ویژگی کمکی) به یک طبقه‌بند سبک sklearn (`LogisticRegression`) داده می‌شوند و برچسب نهایی تولید می‌شود.
@@ -71,7 +71,7 @@ python tasks.py extract
 ```powershell
 python tasks.py scrape-session --user YOUR_IG_USERNAME --browser firefox
 python tasks.py scrape --following --max-count 200 --session-user YOUR_IG_USERNAME
-python tasks.py label
+python tasks.py relabel
 python tasks.py finish
 python tasks.py dashboard
 ```
@@ -93,6 +93,8 @@ python tasks.py scrape --profiles-file datasets/raw/accounts.txt --max-count 200
 ```
 
 اگر اسکرپ ممکن نیست، از `python scripts/proposal_demo.py` برای آزمایش بقیه مراحل استفاده کنید.
+
+**برچسب‌گذاری:** `python tasks.py relabel` روی jsonl موجود کار می‌کند. `python tasks.py label` مجموعه را از استخر raw دوباره می‌سازد و برچسب‌های فعلی را از بین می‌برد — روی دیتاست دفاع از آن استفاده نکنید.
 
 </div>
 
@@ -126,6 +128,8 @@ image  ────────┼─► SmolVLM-256M caption (T̂) ─► M-CLI
 ```
 
 Feature extraction is **staged** (one backbone resident at a time). The M-CLIP text tower runs on **CPU** because XLM-Roberta-Large fp16 weights alone are ~1.04 GiB; captions / image / polarity stages stay under the 1 GiB VRAM budget on CUDA.
+
+`polarity_T_hat` is CLIP smile-vs-sad on the photo (not SmolVLM-caption polarity). `T̂` still feeds `Dsem` and `Fvt`.
 
 ### Constraints
 
@@ -197,17 +201,17 @@ Tests that exercise the heavy backbones (`tests/test_pipeline.py`, parts of `tes
 
 `tasks.py` wraps the common workflows:
 
-| Command | Description |
-| --- | --- |
-| `python scripts/fetch_mclip.py` | Download M-CLIP weights into `models/` (required once). |
-| `python tasks.py extract` | Staged feature extraction (resumable; one backbone at a time). |
-| `python tasks.py train` | Train the sklearn classifier on the labeled dataset. |
-| `python tasks.py eval` | Metrics + sarcasm + staged profile + ablation + baseline + report. |
-| `python tasks.py finish` | Extract → train (from cache) → full eval suite. |
-| `python tasks.py dashboard` | Launch the Streamlit explainability dashboard. |
-| `python tasks.py scrape --following --max-count N` | Scrape recent posts from accounts you follow. |
-| `python tasks.py scrape --profile USER` | Scrape a specific account. |
-| `python tasks.py scrape-session --user USER` | Import Instagram session from browser cookies. |
-| `python tasks.py label` | CLI 5-class annotation tool. |
-| `python tasks.py augment-sarcasm` | Append weak-labeled sarcasm posts from the archive pool. |
-
+| Command                                            | Description                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------------ |
+| `python scripts/fetch_mclip.py`                    | Download M-CLIP weights into `models/` (required once).            |
+| `python tasks.py extract`                          | Staged feature extraction (resumable; one backbone at a time).     |
+| `python tasks.py train`                            | Train the sklearn classifier on the labeled dataset.               |
+| `python tasks.py eval`                             | Metrics + sarcasm + staged profile + ablation + baseline + report. |
+| `python tasks.py finish`                           | Extract → train (from cache) → full eval suite.                    |
+| `python tasks.py dashboard`                        | Launch the Streamlit explainability dashboard.                     |
+| `python tasks.py scrape --following --max-count N` | Scrape recent posts from accounts you follow.                      |
+| `python tasks.py scrape --profile USER`            | Scrape a specific account.                                         |
+| `python tasks.py scrape-session --user USER`       | Import Instagram session from browser cookies.                     |
+| `python tasks.py relabel`                           | In-place 5-class review of the existing jsonl (`--only sarcasm` for the 137 clash posts). |
+| `python tasks.py label`                             | Rebuild labels from the raw pool (do **not** run on the defense dataset). |
+| `python tasks.py augment-sarcasm`                  | Append weak-labeled sarcasm posts from the archive pool.           |

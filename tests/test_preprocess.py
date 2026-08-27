@@ -69,6 +69,15 @@ def test_is_persian_enough_threshold():
     assert is_persian_enough("سلام hi how are you doing today my friend") is False
 
 
+def test_normalize_colloquial_khandun_and_adam():
+    out = normalize_persian("نبین که خندونم کلا ادم خندونیم")
+    assert "خندون" not in out
+    assert "خندانم" in out and "خندانیم" in out
+    assert "آدم" in out
+    assert "خندان" in normalize_persian("میخندونم")
+    assert normalize_persian("ماده") == "ماده"
+
+
 def test_normalize_preserves_arabic_diacritics_position():
     raw = "آرام"
     out = normalize_persian(raw)

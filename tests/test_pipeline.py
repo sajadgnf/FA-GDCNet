@@ -58,20 +58,20 @@ def _make_features(
 def test_predict_from_features_returns_argmax_label():
     clf_pack = _make_clf_pack(target_label="positive_sarcasm", confidence=0.81)
     pipeline = Pipeline(bundle=_FakeBundle(), clf_pack=clf_pack)
-    # Positive caption vs negative description → sarcasm taxonomy holds.
+    # Negative caption vs positive description → positive_sarcasm.
     pred = pipeline.predict_from_features(
         _make_features(
             fvt=0.7,
-            polarity_probs_T=np.array([0.15, 0.85]),
-            polarity_probs_T_hat=np.array([0.85, 0.15]),
+            polarity_probs_T=np.array([0.85, 0.15]),
+            polarity_probs_T_hat=np.array([0.15, 0.85]),
         )
     )
     assert pred.label == "positive_sarcasm"
     assert pred.confidence == pytest.approx(0.81)
 
 
-def test_polarity_conflict_promotes_negative_sarcasm():
-    """Negative caption + positive T̂ should not stay plain ``negative``."""
+def test_polarity_conflict_promotes_positive_sarcasm():
+    """Negative caption + positive T̂ → positive_sarcasm (happy face, sad words)."""
     from inference.pipeline import refine_label_for_polarity_conflict
     from inference.gdrm import DiscrepancyFeatures
 
@@ -80,17 +80,18 @@ def test_polarity_conflict_promotes_negative_sarcasm():
         Dsen=0.57,
         Fvt=0.3,
         cos_TI=0.2,
-        polarity_T=-0.07,
+        polarity_T=-0.55,
         polarity_T_hat=0.50,
     )
     proba = np.full(len(LABELS), 0.05, dtype=np.float32)
     proba[LABELS.index("negative")] = 0.24
     label, conf = refine_label_for_polarity_conflict("negative", 0.24, proba, feats)
-    assert label == "negative_sarcasm"
+    assert label == "positive_sarcasm"
     assert conf >= 0.35
 
 
-def test_polarity_conflict_promotes_positive_sarcasm():
+def test_polarity_conflict_promotes_negative_sarcasm():
+    """Positive caption + negative T̂ → negative_sarcasm."""
     from inference.pipeline import refine_label_for_polarity_conflict
     from inference.gdrm import DiscrepancyFeatures
 
@@ -105,7 +106,7 @@ def test_polarity_conflict_promotes_positive_sarcasm():
     proba = np.full(len(LABELS), 0.05, dtype=np.float32)
     proba[LABELS.index("positive")] = 0.4
     label, _ = refine_label_for_polarity_conflict("positive", 0.4, proba, feats)
-    assert label == "positive_sarcasm"
+    assert label == "negative_sarcasm"
 
 
 def test_clear_conflict_from_neutral_gets_stronger_confidence():
@@ -124,7 +125,7 @@ def test_clear_conflict_from_neutral_gets_stronger_confidence():
     proba = np.full(len(LABELS), 0.05, dtype=np.float32)
     proba[LABELS.index("neutral")] = 0.258
     label, conf = refine_label_for_polarity_conflict("neutral", 0.258, proba, feats)
-    assert label == "negative_sarcasm"
+    assert label == "positive_sarcasm"
     assert conf >= 0.62
 
 
@@ -188,6 +189,86 @@ def test_sad_text_bland_caption_demotes_false_sarcasm():
     )
     assert label == "negative"
     assert conf >= 0.65
+
+
+def test_weak_question_plus_smile_is_not_sarcasm():
+    """«سر صبح زنگ میزنه؟» is only slightly negative because of «؟»."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.18,
+        Dsen=1.10,
+        Fvt=0.27,
+        cos_TI=0.20,
+        polarity_T=-0.1017,
+        polarity_T_hat=0.9977,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("positive_sarcasm")] = 0.693
+    label, _conf = refine_label_for_polarity_conflict(
+        "positive_sarcasm", 0.693, proba, feats
+    )
+    assert label == "positive"
+
+
+def test_mock_laugh_plus_smile_is_positive_sarcasm():
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.15,
+        Dsen=1.6,
+        Fvt=0.27,
+        cos_TI=0.22,
+        polarity_T=-0.75,
+        polarity_T_hat=0.9977,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("positive")] = 0.55
+    label, _conf = refine_label_for_polarity_conflict("positive", 0.55, proba, feats)
+    assert label == "positive_sarcasm"
+
+
+def test_mild_positive_text_plus_smile_is_not_sarcasm():
+    """Dsen from intensity (0.23 vs 0.99) is not a polarity clash."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.25,
+        Dsen=0.76,
+        Fvt=0.27,
+        cos_TI=0.18,
+        polarity_T=0.2333,
+        polarity_T_hat=0.9977,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("positive_sarcasm")] = 0.499
+    label, _conf = refine_label_for_polarity_conflict(
+        "positive_sarcasm", 0.499, proba, feats
+    )
+    assert label == "positive"
+
+
+def test_mourning_caption_smiling_photo_is_positive_sarcasm():
+    """«شادروان» (forced negative) + laughing portrait → clash, not plain positive."""
+    from inference.pipeline import refine_label_for_polarity_conflict
+    from inference.gdrm import DiscrepancyFeatures
+
+    feats = DiscrepancyFeatures(
+        Dsem=0.15,
+        Dsen=1.75,
+        Fvt=0.27,
+        cos_TI=0.22,
+        polarity_T=-0.75,
+        polarity_T_hat=0.997,
+    )
+    proba = np.full(len(LABELS), 0.05, dtype=np.float32)
+    proba[LABELS.index("positive")] = 0.55
+    label, conf = refine_label_for_polarity_conflict("positive", 0.55, proba, feats)
+    assert label == "positive_sarcasm"
+    assert conf >= 0.50
 
 
 def test_predict_from_features_low_fidelity_flag_set_when_fvt_below_tau():

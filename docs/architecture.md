@@ -17,9 +17,9 @@
                                     │           GDRM (Section 3)          │
                                     │                                     │
                                     │   Dsem = 1 - cos(T, T̂)              │
-                                    │   Dsen = ||p(T) - p(T̂)||_1          │
+                                    │   Dsen = ||p(T) - p(I_CLIP)||_1     │
                                     │   Fvt  = cos(I, T̂)                  │
-                                    │   + cos(T, I), pol(T), pol(T̂)       │
+                                    │   + cos(T, I), pol(T), pol(I_CLIP)  │
                                     │                                     │
                                     │   → DiscrepancyFeatures ∈ R⁶        │
                                     └────────────────┬────────────────────┘
@@ -62,8 +62,14 @@
 
   Persian caption T also fed to:
    ┌────────────────────────────────┐
-   │ ParsBERT polarity (frozen)     │── softmax(p_neg, p_pos)    ─► GDRM
+   │ XLM-R sentiment head (frozen)  │── p(T)                         ─► GDRM
    └────────────────────────────────┘
+
+  Image I also fed to:
+   ┌────────────────────────────────┐
+   │ CLIP ViT-B/32 smile vs sad     │── p(I_CLIP) = polarity_T_hat   ─► GDRM
+   └────────────────────────────────┘
+   (SmolVLM T̂ still feeds Dsem / Fvt; it is not the image polarity source.)
 ```
 
 ## Constraints (enforced in code)
@@ -106,8 +112,8 @@
 | `captions` | SmolVLM-256M | CUDA | generated description `T̂` per post |
 | `mclip` (text) | M-CLIP text tower | CPU | text embeddings for `T` and `T̂` |
 | `mclip` (image) | CLIP ViT-B/32 vision | CUDA | `Dsem`, `Fvt`, `cos_TI` |
-| `polarity` | ParsBERT | CUDA | polarity vectors for `T` and `T̂` |
-| `assemble` | (none) | — | `artifacts/features.npz` |
+| `polarity` | twitter-xlm-roberta-base-sentiment | CUDA (fp16) | polarity vector for `T` |
+| `assemble` | CLIP affect cache + join | — | `polarity_T_hat` from smile/sad; `artifacts/features.npz` |
 
 Re-run `python tasks.py extract` safely: each stage skips records already in its
 checkpoint file. `python tasks.py finish` runs extract → train → full eval.
@@ -117,9 +123,9 @@ checkpoint file. `python tasks.py finish` runs extract → train → full eval.
 1. User selects `post_id` from the sidebar (cached dataset index).
 2. `Pipeline.from_pretrained()` is fetched from the Streamlit resource cache;
    on first call it loads the three frozen backbones (one-time cost).
-3. `features_for(text, image)` runs SmolVLM caption + M-CLIP × 3 + ParsBERT.
+3. `features_for(text, image)` runs SmolVLM caption + M-CLIP × 3 + polarity head.
 4. `predict_from_features(features)` runs the sklearn classifier in <1 ms.
-5. `attention_from_text(...)` runs ParsBERT with `output_attentions=True`,
+5. `attention_from_text(...)` runs the polarity head with `output_attentions=True`,
    computes the rollout, and renders the HTML heatmap (RTL-remapped).
 6. `attention_from_image(...)` runs the CLIP vision tower with attentions,
    builds the patch grid, and `overlay(...)` writes the PNG to

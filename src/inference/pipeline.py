@@ -74,9 +74,11 @@ def refine_label_for_polarity_conflict(
     2. Sarcasm without a *clear* opposite T̂ polarity → plain sentiment from T.
     3. Aligned clear polarities → plain positive/negative (lifts weak «neutral»).
 
-    Project taxonomy (see ``scripts/proposal_demo.py`` feature templates):
-    - ``positive_sarcasm``: positive caption vs negative description
-    - ``negative_sarcasm``: negative caption vs positive description
+    Project taxonomy (image/delivery polarity names the subtype):
+    - ``positive_sarcasm``: negative caption vs positive image affect (CLIP)
+      (sad/bitter words with a happy face — e.g. mourning formula + smile)
+    - ``negative_sarcasm``: positive caption vs negative image affect (CLIP)
+      (cheerful words with a bleak image)
     """
     p_t = float(features.polarity_T)
     p_th = float(features.polarity_T_hat)
@@ -84,13 +86,15 @@ def refine_label_for_polarity_conflict(
     text_neg, text_pos = p_t <= -0.05, p_t >= 0.05
     hat_neg, hat_pos = p_th <= -0.15, p_th >= 0.15
     dsen_conflict = dsen >= 0.25
+    # Sarcasm subtypes need a *clear* caption polarity, not a question-mark nick.
+    clash_text_neg, clash_text_pos = p_t <= -0.20, p_t >= 0.20
 
     # ---- conflict → sarcasm -------------------------------------------------
     target: str | None = None
-    if text_neg and hat_pos and dsen_conflict:
-        target = "negative_sarcasm"
-    elif text_pos and hat_neg and dsen_conflict:
+    if clash_text_neg and hat_pos and dsen_conflict:
         target = "positive_sarcasm"
+    elif clash_text_pos and hat_neg and dsen_conflict:
+        target = "negative_sarcasm"
 
     if target is not None:
         if label == target:
@@ -105,6 +109,19 @@ def refine_label_for_polarity_conflict(
         elif abs(p_t) >= 0.2 and abs(p_th) >= 0.25:
             new_conf = max(new_conf, 0.50)
         return target, float(min(new_conf, 0.99))
+
+    # Same-sign polarities are not a sarcasm subtype. Dsen can still be large
+    # from intensity only (mild +0.23 text vs a 0.99 smile).
+    if label == "positive_sarcasm" and not clash_text_neg:
+        fallback = "positive" if (hat_pos or text_pos) else "neutral"
+        return fallback, _promote_confidence(
+            confidence=confidence, proba=proba, target=fallback, floor=0.45, bump=0.15
+        )
+    if label == "negative_sarcasm" and not clash_text_pos:
+        fallback = "negative" if (hat_neg or text_neg) else "neutral"
+        return fallback, _promote_confidence(
+            confidence=confidence, proba=proba, target=fallback, floor=0.45, bump=0.15
+        )
 
     # ---- unsupported sarcasm (e.g. sad text + bland VLM caption) ------------
     # Near-neutral T̂ is not evidence of irony; trust strong caption polarity.
@@ -212,6 +229,7 @@ class Pipeline:
             caption_image,
             embed_image_mclip,
             embed_text_mclip,
+            image_polarity_probs,
             polarity_probs,
         )
 
@@ -220,7 +238,7 @@ class Pipeline:
         text_emb_T_hat = embed_text_mclip(self.bundle, T_hat)
         image_emb_I = embed_image_mclip(self.bundle, image)
         pol_T = polarity_probs(self.bundle, text)
-        pol_T_hat = polarity_probs(self.bundle, T_hat)
+        pol_T_hat = image_polarity_probs(self.bundle, image)
         features = build_feature_vector(
             text_emb_T=text_emb_T,
             text_emb_T_hat=text_emb_T_hat,

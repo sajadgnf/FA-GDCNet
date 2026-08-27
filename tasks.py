@@ -210,6 +210,26 @@ def cmd_label(args: argparse.Namespace) -> int:
     return _run("data.label", *extra)
 
 
+def cmd_relabel(args: argparse.Namespace) -> int:
+    extra: list[str] = ["--only", args.only]
+    if args.start:
+        extra += ["--start", str(args.start)]
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    return _run("data.relabel", *extra)
+
+
+def cmd_retag(args: argparse.Namespace) -> int:
+    extra: list[str] = []
+    if args.dry_run:
+        extra.append("--dry-run")
+    if args.skip_images:
+        extra.append("--skip-images")
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    return _run("data.retag_dataset", *extra)
+
+
 def cmd_prune_pool(args: argparse.Namespace) -> int:
     extra: list[str] = ["--input", args.input]
     if args.annotator:
@@ -426,6 +446,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_label.add_argument("--annotator", default=None)
     p_label.add_argument("--input", default=None)
     p_label.set_defaults(func=cmd_label)
+
+    p_relabel = sub.add_parser(
+        "relabel",
+        help="Review existing dataset labels in place (opens each image).",
+    )
+    p_relabel.add_argument(
+        "--only",
+        choices=("all", "sarcasm", "positive", "negative", "neutral"),
+        default="sarcasm",
+    )
+    p_relabel.add_argument("--start", type=int, default=0)
+    p_relabel.add_argument("--dataset", default=None)
+    p_relabel.set_defaults(func=cmd_relabel)
+
+    p_retag = sub.add_parser(
+        "retag",
+        help="Auto-retag the dataset to the proposal 5-class scheme (CLIP + polarity).",
+    )
+    p_retag.add_argument("--dataset", default=None)
+    p_retag.add_argument("--dry-run", action="store_true")
+    p_retag.add_argument("--skip-images", action="store_true")
+    p_retag.set_defaults(func=cmd_retag)
 
     p_prune = sub.add_parser(
         "prune-pool",
