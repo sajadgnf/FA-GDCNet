@@ -77,28 +77,6 @@ def load_annotations(records: Iterable[dict]) -> dict[str, dict[str, str]]:
     return dict(out)
 
 
-def render_iaa_report(
-    kappas: dict[tuple[str, str], float],
-    *,
-    annotator_labels: dict[str, dict[str, str]],
-) -> str:
-    """Render a Markdown IAA report for `reports/iaa.md`."""
-    lines: list[str] = ["# Inter-Annotator Agreement", "", "## Per-pair Cohen's kappa", ""]
-    if not kappas:
-        lines.append("_No overlapping samples between annotators yet._")
-    else:
-        lines.append("| Annotator A | Annotator B | Overlap | Kappa |")
-        lines.append("| --- | --- | --- | --- |")
-        for (a, b), k in sorted(kappas.items()):
-            overlap = len(set(annotator_labels[a]) & set(annotator_labels[b]))
-            lines.append(f"| {a} | {b} | {overlap} | {k:.4f} |")
-
-    lines += ["", "## Per-annotator counts", "", "| Annotator | Labeled posts |", "| --- | --- |"]
-    for ann, labels in sorted(annotator_labels.items()):
-        lines.append(f"| {ann} | {len(labels)} |")
-    return "\n".join(lines) + "\n"
-
-
 def compute_and_write(
     annotation_records_path: str | Path,
     report_path: str | Path,
@@ -119,3 +97,119 @@ def compute_and_write(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report, encoding="utf-8")
     return report_path
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    if not path.is_file():
+        return rows
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def gold_blind_records(dataset_path: Path, gold_annotator: str) -> list[dict]:
+    """Independent labels from the canonical jsonl after a blind pass.
+
+    Uses ``label`` only on rows tagged ``blind-relabel``. The jsonl
+    ``annotators`` list is not treated as a second rater.
+    """
+    from .tags import BLIND_REVIEW_TAG
+
+    out: list[dict] = []
+    for row in _load_jsonl(dataset_path):
+        tags = [str(a) for a in (row.get("annotators") or [])]
+        if BLIND_REVIEW_TAG not in tags:
+            continue
+        label = row.get("label")
+        if label not in LABELS:
+            continue
+        out.append(
+            {
+                "post_id": str(row["post_id"]),
+                "annotator_id": gold_annotator,
+                "label": label,
+            }
+        )
+    return out
+
+
+def render_iaa_report(
+    kappas: dict[tuple[str, str], float],
+    *,
+    annotator_labels: dict[str, dict[str, str]],
+) -> str:
+    """Render a Markdown IAA report for `reports/iaa.md`."""
+    lines: list[str] = ["# Inter-Annotator Agreement", "", "## Per-pair Cohen's kappa", ""]
+    if not kappas:
+        lines.append("_No overlapping samples between two independent annotators._")
+        lines.append("")
+        lines.append(
+            "`annotators` on a canonical jsonl row is a tag list (who touched the "
+            "row), not two independent labels. Kappa is computed only from "
+            "blind-relabel gold vs `--second` (`datasets/iaa_second.jsonl`)."
+        )
+    else:
+        lines.append("| Annotator A | Annotator B | Overlap | Kappa |")
+        lines.append("| --- | --- | --- | --- |")
+        for (a, b), k in sorted(kappas.items()):
+            overlap = len(set(annotator_labels[a]) & set(annotator_labels[b]))
+            lines.append(f"| {a} | {b} | {overlap} | {k:.4f} |")
+
+    lines += ["", "## Per-annotator counts", "", "| Annotator | Labeled posts |", "| --- | --- |"]
+    for ann, labels in sorted(annotator_labels.items()):
+        lines.append(f"| {ann} | {len(labels)} |")
+    return "\n".join(lines) + "\n"
+
+
+def write_from_gold_and_second(
+    *,
+    dataset: Path,
+    second: Path,
+    report_path: Path,
+    gold_annotator: str,
+) -> Path:
+    gold = gold_blind_records(dataset, gold_annotator)
+    second_rows = _load_jsonl(second)
+    annotator_labels = load_annotations(gold + second_rows)
+    kappas = pairwise_kappa(annotator_labels)
+    body = render_iaa_report(kappas, annotator_labels=annotator_labels)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(body, encoding="utf-8")
+    return report_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Cohen's kappa from blind gold jsonl vs a second-annotator file."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=Path("datasets") / "persian_multimodal_irony.jsonl",
+    )
+    parser.add_argument(
+        "--second",
+        type=Path,
+        default=Path("datasets") / "iaa_second.jsonl",
+    )
+    parser.add_argument("--gold-annotator", default="sjjd6502")
+    parser.add_argument("--out", type=Path, default=Path("reports") / "iaa.md")
+    args = parser.parse_args(argv)
+    path = write_from_gold_and_second(
+        dataset=args.dataset,
+        second=args.second,
+        report_path=args.out,
+        gold_annotator=args.gold_annotator,
+    )
+    print(f"wrote {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

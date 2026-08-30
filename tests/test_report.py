@@ -1,11 +1,11 @@
-"""Report builder includes dummy baseline and CLIP defense notes."""
+"""Report builder uses PDF §6.3 names, dummy, and H3 NOT_RUN/FAIL/PASS."""
 
 from pathlib import Path
 
 from eval.report import render_report
 
 
-def test_render_report_includes_dummy_and_clip_notes(tmp_path: Path):
+def _write_min_inputs(tmp_path: Path) -> dict:
     metrics = tmp_path / "metrics.csv"
     metrics.write_text(
         "fold,accuracy,macro_f1,f1_positive,f1_negative,f1_neutral,"
@@ -40,18 +40,48 @@ def test_render_report_includes_dummy_and_clip_notes(tmp_path: Path):
         "# mean_accuracy_logreg,0.7800\n",
         encoding="utf-8",
     )
-    body = render_report(
-        metrics_csv=metrics,
-        baseline_csv=baseline,
-        profile_json=tmp_path / "missing.json",
-        profile_staged_json=tmp_path / "missing.json",
-        sarcasm_csv=sarcasm,
-        baseline_sarcasm_csv=tmp_path / "missing.csv",
-        ablation_png=tmp_path / "missing.png",
-        ablation_csv=tmp_path / "missing.csv",
-        confusion_png=tmp_path / "missing.png",
-    )
+    return {
+        "metrics_csv": metrics,
+        "baseline_csv": baseline,
+        "profile_json": tmp_path / "missing.json",
+        "profile_staged_json": tmp_path / "missing.json",
+        "sarcasm_csv": sarcasm,
+        "baseline_sarcasm_csv": tmp_path / "missing.csv",
+        "ablation_png": tmp_path / "missing.png",
+        "ablation_csv": tmp_path / "missing.csv",
+        "confusion_png": tmp_path / "missing.png",
+    }
+
+
+def test_render_report_pdf_hypotheses_and_dummy(tmp_path: Path):
+    kwargs = _write_min_inputs(tmp_path)
+    heavy = tmp_path / "heavy_compare.json"
+    heavy.write_text('{"ran": false, "h3": "NOT_RUN", "reason": "test"}\n', encoding="utf-8")
+    body = render_report(**kwargs, heavy_compare_json=heavy)
     assert "0.5900" in body
+    assert "Always-not-sarcasm dummy" in body
+    assert "Hypothesis 3" in body
+    assert "**NOT_RUN**" in body
+    assert "Research question 2" in body
+    assert "H1 memory < 1 GiB" in body
+    assert "H2 sarcasm accuracy > 70%" in body
+    assert "H3 vs heavy model" in body
+    assert "research question, not H3" in body
     assert "CLIP facial affect" in body
-    assert "`positive`" in body
     assert "binary F1" in body
+    assert "twitter-xlm-roberta" in body
+    assert "not independent of CLIP" in body
+
+
+def test_render_report_h3_fail_stamp(tmp_path: Path):
+    kwargs = _write_min_inputs(tmp_path)
+    heavy = tmp_path / "heavy_compare.json"
+    heavy.write_text(
+        '{"ran": true, "h3": "FAIL", "model": "x", "reason": "", '
+        '"n_samples": 10, "heavy_accuracy": 0.9, "ours_accuracy": 0.5, '
+        '"accuracy_drop": 0.4}\n',
+        encoding="utf-8",
+    )
+    body = render_report(**kwargs, heavy_compare_json=heavy)
+    assert "| H3 vs heavy model" in body
+    assert "**FAIL**" in body

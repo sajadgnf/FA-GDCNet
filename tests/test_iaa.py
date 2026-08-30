@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from data.iaa import cohens_kappa, load_annotations, pairwise_kappa, render_iaa_report
+from data.iaa import (
+    cohens_kappa,
+    gold_blind_records,
+    load_annotations,
+    pairwise_kappa,
+    render_iaa_report,
+    write_from_gold_and_second,
+)
 
 
 def test_kappa_perfect_agreement():
@@ -61,6 +70,49 @@ def test_load_annotations_groups_by_annotator():
     out = load_annotations(rows)
     assert out["alice"] == {"p1": "positive", "p2": "neutral"}
     assert out["bob"] == {"p1": "negative"}
+
+
+def test_gold_blind_ignores_tag_list_as_second_rater(tmp_path):
+    ds = tmp_path / "gold.jsonl"
+    ds.write_text(
+        json.dumps(
+            {
+                "post_id": "p1",
+                "caption": "c",
+                "image_path": "i.jpg",
+                "label": "positive",
+                "annotators": ["sjjd6502", "proposal-retag", "blind-relabel"],
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "post_id": "p2",
+                "caption": "c",
+                "image_path": "i.jpg",
+                "label": "negative",
+                "annotators": ["proposal-retag"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    gold = gold_blind_records(ds, "sjjd6502")
+    assert [r["post_id"] for r in gold] == ["p1"]
+    second = tmp_path / "second.jsonl"
+    second.write_text(
+        json.dumps({"post_id": "p1", "annotator_id": "bob", "label": "positive"}) + "\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "iaa.md"
+    write_from_gold_and_second(
+        dataset=ds, second=second, report_path=report, gold_annotator="sjjd6502"
+    )
+    body = report.read_text(encoding="utf-8")
+    assert "bob" in body
+    assert "sjjd6502" in body
+    assert "| 1 |" in body
+    assert "proposal-retag" not in body
 
 
 def test_render_iaa_report_handles_no_overlap():

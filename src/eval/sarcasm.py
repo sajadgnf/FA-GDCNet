@@ -20,6 +20,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
 
+from data.eval_set import slice_to_eval_set
 from data.schema import LABELS
 from inference.classifier import DEFAULT_DATASET, DEFAULT_FEATURES, compute_dataset_features
 
@@ -40,8 +41,11 @@ def _to_binary(labels: np.ndarray) -> np.ndarray:
 def _load_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray]:
     if cache.exists():
         npz = np.load(cache, allow_pickle=True)
-        return npz["X"], npz["y"]
-    X, y, _ = compute_dataset_features(dataset, cache_path=cache)
+        ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
+        X, y, _, _ = slice_to_eval_set(dataset, npz["X"], npz["y"], ids)
+        return X, y
+    X, y, ids = compute_dataset_features(dataset, cache_path=cache)
+    X, y, _, _ = slice_to_eval_set(dataset, X, y, list(ids))
     return X, y
 
 

@@ -26,6 +26,7 @@ from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.svm import LinearSVC
 
+from data.eval_set import slice_to_eval_set
 from data.schema import LABELS, iter_dataset
 
 from .gdrm import FEATURE_NAMES, DiscrepancyFeatures
@@ -284,9 +285,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.from_cache and args.features_cache.exists():
         npz = np.load(args.features_cache, allow_pickle=True)
-        X, y = npz["X"], npz["y"]
+        ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
+        X, y, _, n_excl = slice_to_eval_set(args.dataset, npz["X"], npz["y"], ids)
+        log.info("train from cache after eval filter: n=%d excluded_bootstrap=%d", len(y), n_excl)
     else:
-        X, y, _ = compute_dataset_features(args.dataset, cache_path=args.features_cache)
+        X, y, ids = compute_dataset_features(args.dataset, cache_path=args.features_cache)
+        X, y, _, n_excl = slice_to_eval_set(args.dataset, X, y, list(ids))
+        log.info("train after extract + eval filter: n=%d excluded_bootstrap=%d", len(y), n_excl)
 
     result = train(X, y, save_to=args.save_to)
     print(json.dumps({

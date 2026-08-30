@@ -211,12 +211,43 @@ def cmd_label(args: argparse.Namespace) -> int:
 
 
 def cmd_relabel(args: argparse.Namespace) -> int:
-    extra: list[str] = ["--only", args.only]
+    extra: list[str] = ["--only", args.only, "--annotator", args.annotator]
     if args.start:
         extra += ["--start", str(args.start)]
     if args.dataset:
         extra += ["--dataset", args.dataset]
+    if not args.pending_only:
+        extra.append("--no-pending-only")
+    if getattr(args, "count_only", False):
+        extra.append("--count-only")
+    if getattr(args, "ids_file", None):
+        extra += ["--ids-file", str(args.ids_file)]
+    if getattr(args, "out", None):
+        extra += ["--out", str(args.out)]
+    if getattr(args, "export_overlap", None):
+        extra += ["--export-overlap", str(args.export_overlap)]
+    extra += ["--n-non-sarcasm", str(args.n_non_sarcasm), "--seed", str(args.seed)]
     return _run("data.relabel", *extra)
+
+
+def cmd_iaa(args: argparse.Namespace) -> int:
+    extra: list[str] = ["--gold-annotator", args.gold_annotator]
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    if args.second:
+        extra += ["--second", args.second]
+    if args.out:
+        extra += ["--out", args.out]
+    return _run("data.iaa", *extra)
+
+
+def cmd_sync_labels(args: argparse.Namespace) -> int:
+    extra: list[str] = []
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    if args.features_cache:
+        extra += ["--features-cache", args.features_cache]
+    return _run("data.sync_labels", *extra)
 
 
 def cmd_retag(args: argparse.Namespace) -> int:
@@ -252,10 +283,12 @@ def cmd_train(args: argparse.Namespace) -> int:
     extra: list[str] = []
     if args.dataset:
         extra += ["--dataset", args.dataset]
+    if getattr(args, "from_cache", False):
+        extra.append("--from-cache")
     return _run("inference.classifier", *extra)
 
 
-def cmd_eval(_: argparse.Namespace) -> int:
+def cmd_eval(args: argparse.Namespace) -> int:
     rc = _run("eval.metrics")
     if rc != 0:
         return rc
@@ -271,6 +304,10 @@ def cmd_eval(_: argparse.Namespace) -> int:
     rc = _run("eval.baseline")
     if rc != 0:
         return rc
+    if getattr(args, "heavy", False):
+        rc = _run("eval.heavy_baseline")
+        if rc != 0:
+            return rc
     return _run("eval.report")
 
 
@@ -449,7 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_relabel = sub.add_parser(
         "relabel",
-        help="Review existing dataset labels in place (opens each image).",
+        help="Blind 5-class review (no current label shown; Enter does not confirm).",
     )
     p_relabel.add_argument(
         "--only",
@@ -458,7 +495,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_relabel.add_argument("--start", type=int, default=0)
     p_relabel.add_argument("--dataset", default=None)
+    p_relabel.add_argument("--annotator", default="sjjd6502")
+    p_relabel.add_argument(
+        "--pending-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    p_relabel.add_argument("--count-only", action="store_true")
+    p_relabel.add_argument(
+        "--ids-file",
+        default=None,
+        help="Restrict to post_ids in this file (use with --only all for overlap).",
+    )
+    p_relabel.add_argument(
+        "--out",
+        default=None,
+        help="Second annotator file; does not change gold jsonl.",
+    )
+    p_relabel.add_argument(
+        "--export-overlap",
+        nargs="?",
+        const="datasets/iaa_overlap_ids.txt",
+        default=None,
+        help="Write sarcasm + stratified non-sarcasm ids and exit.",
+    )
+    p_relabel.add_argument("--n-non-sarcasm", type=int, default=100)
+    p_relabel.add_argument("--seed", type=int, default=0)
     p_relabel.set_defaults(func=cmd_relabel)
+
+    p_iaa = sub.add_parser(
+        "iaa",
+        help="Cohen's kappa from blind gold vs datasets/iaa_second.jsonl.",
+    )
+    p_iaa.add_argument("--dataset", default=None)
+    p_iaa.add_argument("--second", default=None)
+    p_iaa.add_argument("--gold-annotator", default="sjjd6502")
+    p_iaa.add_argument("--out", default=None)
+    p_iaa.set_defaults(func=cmd_iaa)
+
+    p_sync = sub.add_parser(
+        "sync-labels",
+        help="Copy jsonl labels onto artifacts/features.npz y (does not recompute X).",
+    )
+    p_sync.add_argument("--dataset", default=None)
+    p_sync.add_argument("--features-cache", default=None)
+    p_sync.set_defaults(func=cmd_sync_labels)
 
     p_retag = sub.add_parser(
         "retag",
@@ -507,9 +588,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_train = sub.add_parser("train")
     p_train.add_argument("--dataset", default=None)
+    p_train.add_argument(
+        "--from-cache",
+        action="store_true",
+        help="Fit from artifacts/features.npz without re-extracting backbones.",
+    )
     p_train.set_defaults(func=cmd_train)
 
-    sub.add_parser("eval").set_defaults(func=cmd_eval)
+    p_eval = sub.add_parser("eval")
+    p_eval.add_argument(
+        "--heavy",
+        action="store_true",
+        help="Also run Qwen2-VL Hypothesis 3 (can crash or pin the GPU).",
+    )
+    p_eval.set_defaults(func=cmd_eval)
 
     sub.add_parser(
         "finish",
