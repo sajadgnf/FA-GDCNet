@@ -1,9 +1,11 @@
-"""Text-only ParsBERT baseline on the same 5-fold splits.
+"""Text-only polarity baseline on the same labeled rows as the multimodal set.
 
-The frozen ParsBERT polarity head emits a 2-class (neg/pos) distribution. We
-project that to the 5-class label space by using `argmax`-style mapping and
-fitting a tiny LogisticRegression on the same fold splits, so the comparison
-is apples-to-apples with the multimodal pipeline (same data, same folds).
+The frozen head is ``cardiffnlp/twitter-xlm-roberta-base-sentiment`` (2-d),
+not ParsBERT. The proposal named ParsBERT; this file documents the deviation.
+
+A tiny LogisticRegression is fit on the same 5-fold splits as the multimodal
+head. The cache is ignored when ``post_ids``/``y`` do not match the current
+jsonl (same image-present filter).
 
 Outputs `reports/baseline.csv`.
 """
@@ -20,6 +22,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
 
+from data.eval_set import is_eval_eligible, slice_records_from_cache
 from data.schema import LABELS, iter_dataset
 
 log = logging.getLogger(__name__)
@@ -32,16 +35,34 @@ DEFAULT_BASELINE_FEATURES = Path("artifacts") / "baseline_features.npz"
 SARCASM_LABELS = frozenset({"positive_sarcasm", "negative_sarcasm"})
 
 
+def _usable_records(dataset: Path) -> list:
+    return [
+        r
+        for r in iter_dataset(dataset)
+        if Path(r.image_path).is_file() and is_eval_eligible(r.annotators)
+    ]
+
+
+def _cache_matches_dataset(cache: Path, records: list) -> bool:
+    if not cache.is_file():
+        return False
+    npz = np.load(cache, allow_pickle=True)
+    if "post_ids" not in npz or "y" not in npz:
+        return False
+    cached = list(zip((str(x) for x in npz["post_ids"]), (str(x) for x in npz["y"])))
+    want = [(r.post_id, r.label) for r in records]
+    return cached == want
+
+
 def _compute_baseline_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray]:
-    if cache.exists():
-        npz = np.load(cache, allow_pickle=True)
-        return npz["X"], npz["y"]
+    records = _usable_records(dataset)
+    sliced = slice_records_from_cache(cache, records)
+    if sliced is not None:
+        return sliced
+    if cache.is_file():
+        log.warning("baseline cache unusable vs %s; recomputing", dataset)
 
     from inference.models import load_polarity_only, polarity_probs
-
-    # Records without a readable image are excluded from the multimodal features,
-    # so the baseline must skip them too or the two are not comparable.
-    records = [r for r in iter_dataset(dataset) if Path(r.image_path).is_file()]
 
     bundle = load_polarity_only()
     X_rows: list[np.ndarray] = []

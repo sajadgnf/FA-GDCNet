@@ -24,6 +24,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.model_selection import StratifiedKFold
 
+from data.eval_set import slice_to_eval_set
 from data.schema import LABELS
 
 from inference.classifier import (
@@ -36,16 +37,21 @@ log = logging.getLogger(__name__)
 
 DEFAULT_METRICS_CSV = Path("reports") / "metrics.csv"
 DEFAULT_CONFUSION_PNG = Path("reports") / "confusion.png"
+DEFAULT_OOF_JSONL = Path("reports") / "oof_preds.jsonl"
 SARCASM_LABELS = ("positive_sarcasm", "negative_sarcasm")
 SARCASM_ACCURACY_FLOOR = 0.70
 
 
-def _load_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray]:
+def _load_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray, list[str], int]:
     if cache.exists():
         npz = np.load(cache, allow_pickle=True)
-        return npz["X"], npz["y"]
-    X, y, _ = compute_dataset_features(dataset, cache_path=cache)
-    return X, y
+        ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
+        X, y = npz["X"], npz["y"]
+    else:
+        X, y, ids = compute_dataset_features(dataset, cache_path=cache)
+        ids = list(ids)
+    X, y, ids, n_excl = slice_to_eval_set(dataset, X, y, ids)
+    return X, y, ids, n_excl
 
 
 def _build_clf() -> LogisticRegression:
@@ -67,8 +73,8 @@ def evaluate(X: np.ndarray, y: np.ndarray, *, n_splits: int = 5) -> dict:
 
     dummy_accuracies: list[float] = []
     dummy_macro_f1s: list[float] = []
-    oof_true: list[str] = []
-    oof_pred: list[str] = []
+    oof_true = np.empty(len(y), dtype=object)
+    oof_pred = np.empty(len(y), dtype=object)
 
     for fold_idx, (train_idx, test_idx) in enumerate(skf.split(X, y), start=1):
         clf = _build_clf()
@@ -89,8 +95,8 @@ def evaluate(X: np.ndarray, y: np.ndarray, *, n_splits: int = 5) -> dict:
             f1_score(true, dpred, average="macro", labels=list(LABELS), zero_division=0)
         )
 
-        oof_true.extend(true.tolist())
-        oof_pred.extend(preds.tolist())
+        oof_true[test_idx] = true
+        oof_pred[test_idx] = preds
 
         sarcasm_mask = np.isin(true, SARCASM_LABELS)
         if sarcasm_mask.any():
@@ -108,8 +114,8 @@ def evaluate(X: np.ndarray, y: np.ndarray, *, n_splits: int = 5) -> dict:
         "sarcasm_accuracy": sarcasm_accuracies,
         "dummy_accuracy": dummy_accuracies,
         "dummy_macro_f1": dummy_macro_f1s,
-        "oof_true": oof_true,
-        "oof_pred": oof_pred,
+        "oof_true": [str(v) for v in oof_true.tolist()],
+        "oof_pred": [str(v) for v in oof_pred.tolist()],
         "n_samples": int(len(y)),
         "label_counts": {lbl: int(counts.get(lbl, 0)) for lbl in LABELS},
     }
@@ -153,8 +159,33 @@ def write_csv(result: dict, path: Path) -> Path:
         writer.writerow(["# dummy_majority_accuracy", f"{dummy_acc_mu:.4f}"])
         writer.writerow(["# dummy_majority_macro_f1", f"{dummy_f1_mu:.4f}"])
         writer.writerow(["# n_samples", str(result.get("n_samples", ""))])
+        writer.writerow(
+            ["# n_excluded_bootstrap", str(result.get("n_excluded_bootstrap", ""))]
+        )
         for lbl in LABELS:
             writer.writerow([f"# n_{lbl}", str((result.get("label_counts") or {}).get(lbl, ""))])
+    return path
+
+
+def write_oof_jsonl(
+    post_ids: list[str],
+    y_true: list[str],
+    y_pred: list[str],
+    path: Path,
+) -> Path:
+    """One row per sample, aligned with the feature-cache order."""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for pid, gold, pred in zip(post_ids, y_true, y_pred):
+            fh.write(
+                json.dumps(
+                    {"post_id": str(pid), "gold": str(gold), "pred": str(pred)},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     return path
 
 
@@ -198,14 +229,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--features-cache", type=Path, default=DEFAULT_FEATURES)
     parser.add_argument("--out", type=Path, default=DEFAULT_METRICS_CSV)
     parser.add_argument("--confusion", type=Path, default=DEFAULT_CONFUSION_PNG)
+    parser.add_argument("--oof", type=Path, default=DEFAULT_OOF_JSONL)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    X, y = _load_features(args.dataset, args.features_cache)
+    X, y, post_ids, n_excl = _load_features(args.dataset, args.features_cache)
     result = evaluate(X, y)
+    result["n_excluded_bootstrap"] = n_excl
     out = write_csv(result, args.out)
     cm_path = write_confusion_png(result["oof_true"], result["oof_pred"], args.confusion)
-    log.info("wrote %s and %s", out, cm_path)
+    if post_ids and len(post_ids) == len(result["oof_pred"]):
+        oof_path = write_oof_jsonl(post_ids, result["oof_true"], result["oof_pred"], args.oof)
+        log.info("wrote %s, %s, and %s", out, cm_path, oof_path)
+    else:
+        log.warning("skipped OOF jsonl: post_ids missing or length mismatch")
+        log.info("wrote %s and %s", out, cm_path)
     return 0
 
 

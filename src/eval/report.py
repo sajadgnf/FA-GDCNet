@@ -28,6 +28,7 @@ DEFAULT_BASELINE_SARCASM = Path("reports") / "baseline_sarcasm.csv"
 DEFAULT_ABLATION_PNG = Path("reports") / "ablation.png"
 DEFAULT_ABLATION_CSV = Path("reports") / "ablation.csv"
 DEFAULT_CONFUSION_PNG = Path("reports") / "confusion.png"
+DEFAULT_HEAVY = Path("reports") / "heavy_compare.json"
 DEFAULT_OUT = Path("reports") / "REPORT.md"
 
 SARCASM_LABELS = ("positive_sarcasm", "negative_sarcasm")
@@ -129,6 +130,7 @@ def render_report(
     ablation_png: Path,
     ablation_csv: Path = DEFAULT_ABLATION_CSV,
     confusion_png: Path = DEFAULT_CONFUSION_PNG,
+    heavy_compare_json: Path = DEFAULT_HEAVY,
 ) -> str:
     metrics = _read_csv(metrics_csv)
     baseline = _read_csv(baseline_csv)
@@ -141,6 +143,11 @@ def render_report(
     )
     sarcasm_rows = _read_csv(sarcasm_csv)
     baseline_sarcasm_rows = _read_csv(baseline_sarcasm_csv)
+    heavy = (
+        json.loads(heavy_compare_json.read_text(encoding="utf-8"))
+        if heavy_compare_json.exists()
+        else {}
+    )
 
     dummy_acc = _read_footer_value(metrics, "dummy_majority_accuracy")
     dummy_f1 = _read_footer_value(metrics, "dummy_majority_macro_f1")
@@ -171,7 +178,8 @@ def render_report(
     if dummy_acc:
         lines.append(
             f"- Majority dummy (same folds): accuracy **{dummy_acc}**, "
-            f"macro-F1 **{dummy_f1 or '—'}**. Lead with macro-F1, not accuracy."
+            f"macro-F1 **{dummy_f1 or '—'}**. 5-class accuracy is not better than "
+            f"this dummy when the dummy is higher."
         )
         lines.append("")
 
@@ -185,6 +193,13 @@ def render_report(
         if n_samples:
             lines.append(f"| **total** | {n_samples} |")
         lines.append("")
+        n_excl = _read_footer_value(metrics, "n_excluded_bootstrap")
+        if n_excl and n_excl not in {"", "0"}:
+            lines.append(
+                f"Excluded **{n_excl}** `weak-sarcasm-bootstrap` rows from eval "
+                "(unless later tagged `blind-relabel`)."
+            )
+            lines.append("")
 
     lines.append("### Per-class F1 (mean±std)")
     lines.append("")
@@ -195,7 +210,12 @@ def render_report(
         lines.append(f"| `{lbl}` | {cell or '—'} |")
     lines.append("")
 
-    lines.append("## Unimodal ParsBERT baseline (same folds)")
+    lines.append("## Unimodal text-polarity baseline (same folds)")
+    lines.append("")
+    lines.append(
+        "Head is `cardiffnlp/twitter-xlm-roberta-base-sentiment` (2-d), "
+        "not ParsBERT. The proposal named ParsBERT; this is a deviation."
+    )
     lines.append("")
     if baseline:
         lines.append("| fold | accuracy | macro_f1 |")
@@ -219,7 +239,13 @@ def render_report(
     bs_sarcasm = _sarcasm_macro_f1(baseline)
     delta = mm_sarcasm - bs_sarcasm
     passes = delta >= SARCASM_F1_DELTA_FLOOR
-    lines.append("## Sarcasm-F1 improvement check")
+    lines.append("## Research question 2 (not Hypothesis 3)")
+    lines.append("")
+    lines.append(
+        "PDF §6.2 Q2: does Dsem+Dsen raise sarcasm detection by at least 10% "
+        "versus a unimodal method? This is a research question. Hypothesis 3 "
+        "in §6.3 is the heavy-model speed/accuracy comparison."
+    )
     lines.append("")
     lines.append(
         f"- Multimodal sarcasm-F1 (macro of {', '.join(SARCASM_LABELS)}): **{mm_sarcasm:.4f}**"
@@ -227,7 +253,7 @@ def render_report(
     lines.append(f"- Unimodal baseline sarcasm-F1: **{bs_sarcasm:.4f}**")
     lines.append(f"- Δ = **{delta:+.4f}** ({delta * 100:+.2f} percentage points)")
     lines.append(
-        f"- Meets ≥10 pp hypothesis: **{'YES' if passes else 'NO'}**"
+        f"- Meets ≥10 pp vs unimodal: **{'YES' if passes else 'NO'}**"
     )
     lines.append("")
 
@@ -251,8 +277,24 @@ def render_report(
         )
     else:
         lines.append("- LogReg on discrepancy features: see `sarcasm.csv`")
+    n_ps = _read_footer_value(metrics, "n_positive_sarcasm")
+    n_ns = _read_footer_value(metrics, "n_negative_sarcasm")
+    n_tot = _read_footer_value(metrics, "n_samples")
+    dummy_not_sarc = ""
+    try:
+        if n_ps and n_ns and n_tot:
+            dummy_not_sarc = f"{1.0 - (float(n_ps) + float(n_ns)) / float(n_tot):.4f}"
+    except (TypeError, ValueError, ZeroDivisionError):
+        dummy_not_sarc = ""
     lines.append(f"- Unimodal baseline binary accuracy: **{bs_bin:.4f}**")
-    lines.append(f"- Meets ≥70% accuracy (Dsem rule): **{'YES' if bin_passes else 'NO'}**")
+    if dummy_not_sarc:
+        lines.append(
+            f"- Always-not-sarcasm dummy accuracy: **{dummy_not_sarc}** "
+            f"(H2 letter-pass does not imply beating this dummy)."
+        )
+    lines.append(
+        f"- Meets ≥70% accuracy (Dsem rule): **{'YES' if bin_passes else 'NO'}**"
+    )
     lines.append("")
 
     if profile_staged:
@@ -307,37 +349,69 @@ def render_report(
             lines.append(f"![Ablation Macro-F1]({ablation_png.name})")
             lines.append("")
         if ablation_rows:
-            lines.append("| configuration | n_features | mean_macro_f1 |")
-            lines.append("| --- | --- | --- |")
+            lines.append("| configuration | n_features | mean_macro_f1 | mean_sarcasm_f1 |")
+            lines.append("| --- | --- | --- | --- |")
             for r in ablation_rows:
                 lines.append(
                     f"| {r.get('configuration','')} | {r.get('n_features','')} | "
-                    f"{r.get('mean_macro_f1','')} |"
+                    f"{r.get('mean_macro_f1','')} | {r.get('mean_sarcasm_f1','')} |"
                 )
             lines.append("")
             lines.append(
                 "`aux_only` is `cos_TI` + `polarity_T` + `polarity_T_hat`. "
-                "Dsen is partly redundant with those polarities, so core-signal "
-                "deltas can be small. The proposal claim is **multimodal vs unimodal**, "
-                "not Dsen vs aux."
+                "`no_clip` is `Dsem`+`Fvt`+`cos_TI`+`polarity_T` (drops CLIP "
+                "`polarity_T_hat` and `Dsen`). PDF §8.3 required showing that "
+                "Dsem and Dsen improve the final model. If `aux_only` matches or "
+                "beats the full six-feature row, that contribution is **not shown**. "
+                "If `no_clip` sarcasm-F1 collapses, subtype F1 depended on CLIP."
             )
             lines.append("")
 
-    lines.append("## Proposal claims checklist")
+    h3 = str(heavy.get("h3") or "NOT_RUN")
+    if heavy:
+        lines.append("## Hypothesis 3 (heavy multimodal comparison)")
+        lines.append("")
+        lines.append(f"- Model: `{heavy.get('model', '?')}`")
+        lines.append(f"- Ran: **{'YES' if heavy.get('ran') else 'NO'}**")
+        if heavy.get("reason"):
+            lines.append(f"- Reason: {heavy.get('reason')}")
+        lines.append(f"- Samples: `{heavy.get('n_samples', 0)}`")
+        lines.append(f"- Heavy 5-class accuracy: **{heavy.get('heavy_accuracy')}**")
+        lines.append(f"- Ours OOF accuracy (same ids): **{heavy.get('ours_accuracy')}**")
+        lines.append(f"- Accuracy drop (heavy − ours): **{heavy.get('accuracy_drop')}**")
+        lines.append(f"- Heavy median latency: **{heavy.get('heavy_median_latency_s')}** s")
+        lines.append(f"- Ours staged median latency: **{heavy.get('ours_median_latency_s')}** s")
+        lines.append(f"- Heavy peak VRAM: **{heavy.get('heavy_peak_memory_gib')}** GiB")
+        lines.append(f"- Ours staged peak VRAM: **{heavy.get('ours_peak_memory_gib')}** GiB")
+        if heavy.get("note"):
+            lines.append(f"- {heavy['note']}")
+        lines.append(f"- Hypothesis 3: **{h3}**")
+        lines.append("")
+
+    lines.append("## Proposal hypotheses (PDF §6.3)")
     lines.append("")
-    lines.append("| Claim | Result |")
+    lines.append("| Item | Result |")
     lines.append("| --- | --- |")
-    lines.append(f"| GDCNet-FA (Dsem/Dsen/Fvt) implemented | YES (see ablation) |")
-    lines.append(f"| Training-free backbones | YES (`assert_frozen`) |")
-    lines.append(f"| Binary sarcasm accuracy ≥ 70% (Dsem rule) | **{'YES' if bin_passes else 'NO'}** ({mm_bin:.1%}) |")
-    lines.append(f"| Multimodal ≥10 pp over unimodal (sarcasm F1) | **{'YES' if passes else 'NO'}** ({delta*100:+.1f} pp) |")
     staged_ok = bool(profile_staged.get("under_1gib_budget"))
     lines.append(
-        f"| Peak VRAM ≤ 1 GiB (staged) | **{'YES' if staged_ok else 'NO'}** "
+        f"| H1 memory < 1 GiB (staged peak) | **{'YES' if staged_ok else 'NO'}** "
         f"({profile_staged.get('peak_memory_gib', 0.0):.2f} GiB)"
         if profile_staged
-        else "| Peak VRAM ≤ 1 GiB (staged) | _not measured_ |"
+        else "| H1 memory < 1 GiB (staged peak) | _not measured_ |"
     )
+    h2_note = f"{mm_bin:.1%}"
+    if dummy_not_sarc:
+        h2_note += f"; always-not-sarcasm dummy {dummy_not_sarc}"
+    lines.append(
+        f"| H2 sarcasm accuracy > 70% (Dsem rule) | **{'YES' if bin_passes else 'NO'}** ({h2_note}) |"
+    )
+    lines.append(f"| H3 vs heavy model (<1 GiB, faster, drop <5%) | **{h3}** |")
+    lines.append(
+        f"| RQ2 multimodal sarcasm F1 ≥10 pp vs unimodal | **{'YES' if passes else 'NO'}** "
+        f"({delta*100:+.1f} pp) — research question, not H3 |"
+    )
+    lines.append("| Training-free backbones | YES (`assert_frozen`) |")
+    lines.append("| §8.3 Dsem/Dsen improve the model | see ablation (null if aux_only ≈ full) |")
     lines.append("")
 
     lines.append("## How to read the scores (defense notes)")
@@ -348,9 +422,10 @@ def render_report(
         "dummy can beat overall accuracy while losing the rare classes."
     )
     lines.append(
-        "- **Binary Dsem accuracy** is the metric named in Hypothesis 2. "
-        "Sarcasm is the minority class (~12%), so also report binary sarcasm F1; "
-        "high accuracy alone does not mean sarcasm is detected that often."
+        "- **Hypothesis 2** is sarcasm **accuracy > 70%**. The Dsem rule is the "
+        "number stamped YES/NO against that bar. Always-not-sarcasm dummy "
+        "accuracy and binary F1 must be read with it. Beating 70% is not the "
+        "same as beating the dummy."
     )
     lines.append(
         "- **`polarity_T_hat`** in GDRM is **CLIP facial affect** (smile vs sad), "
@@ -361,8 +436,11 @@ def render_report(
         "omit expression)."
     )
     lines.append(
-        "- **Sarcasm-subtype F1** is an **upper bound** until the sarcasm gold labels "
-        "are fully hand-reviewed: visual affect informed both the gold rule and `polarity_T_hat`."
+        "- **Sarcasm-subtype F1** is still not independent of CLIP: "
+        "`polarity_T_hat` in the feature vector is the same smile/sad channel "
+        "that informed the original retag. One-human review of current sarcasm "
+        "rows reduces but does not remove that overlap. Kappa is undefined "
+        "without a second annotator."
     )
     lines.append(
         "- **Neutral F1** is the weakest class (thin captions / ads). It is not the "
@@ -388,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ablation-png", type=Path, default=DEFAULT_ABLATION_PNG)
     parser.add_argument("--ablation-csv", type=Path, default=DEFAULT_ABLATION_CSV)
     parser.add_argument("--confusion", type=Path, default=DEFAULT_CONFUSION_PNG)
+    parser.add_argument("--heavy", type=Path, default=DEFAULT_HEAVY)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -402,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         ablation_png=args.ablation_png,
         ablation_csv=args.ablation_csv,
         confusion_png=args.confusion,
+        heavy_compare_json=args.heavy,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(body, encoding="utf-8")

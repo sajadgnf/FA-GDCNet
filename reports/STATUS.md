@@ -1,35 +1,39 @@
 # Pipeline status
 
-## Proposal claims (`reports/REPORT.md`)
+Bars are PDF §6.3. n_eval = 1043 after dropping 141 `weak-sarcasm-bootstrap` rows.
 
-| Claim | Status |
+## Proposal hypotheses
+
+| Item | Status |
 | --- | --- |
-| GDCNet-FA (Dsem/Dsen/Fvt) | **PASS** |
-| Training-free inference | **PASS** |
-| Binary sarcasm ≥ 70% (Dsem rule) | **PASS** — **85.9%** (also report binary F1 ~0.46; sarcasm is ~12%) |
-| Multimodal +10 pp over unimodal | **PASS** — **+46.8 pp** sarcasm F1 |
-| Peak VRAM ≤ 1 GiB (staged) | **PASS** — **0.94 GiB** |
+| H1 memory < 1 GiB (staged peak) | **YES** — 0.945 GiB. Dashboard resident **4.176 GiB**. |
+| H2 sarcasm accuracy > 70% | **YES** on the written bar — Dsem **85.4%**. Always-not-sarcasm dummy **88.3%**. Binary F1 **0.46**. |
+| H3 vs heavy model | **NOT_RUN**. Qwen2-VL-2B crashed on load (0xC0000005). Not PASS. Use `python tasks.py eval --heavy` only on other hardware. |
+| RQ2 sarcasm F1 ≥10 pp vs unimodal | **YES** on the **current** gold: multimodal **0.514** vs text polarity **0.250** (**+26.4 pp**). Still not independent of CLIP in features. |
+| §8.3 Dsem/Dsen improve 5-class | **Not shown.** `aux_only` macro-F1 **0.487** > full six **0.480**. |
+| Circularity (`no_clip` = drop CLIP hat + Dsen) | sarcasm-F1 **0.258** vs `aux_only` **0.497**. Subtype F1 depends on CLIP. |
 
-## Key metrics (CLIP image polarity + retag)
+## 5-class (OOF)
 
-- 5-class **macro-F1: 0.486 ± 0.017** (use this)
-- 5-class accuracy: 0.484 ± 0.026 vs majority dummy **0.590** (dummy macro-F1 **0.148**)
-- Sarcasm-subtype F1: **0.52** (upper bound until 137 gold sarcasm posts are hand-reviewed)
-- Binary Dsem accuracy: **85.9%**; binary LogReg F1: **0.46**
-- Staged peak VRAM: **0.945 GiB**
-- Evaluated n = 1187 (positive 700, negative 243, neutral 107, +sarc 86, −sarc 51)
+- Accuracy **0.478** vs majority dummy **0.587**
+- Macro-F1 **0.480** vs dummy **0.148**
+- Unimodal (same rows) accuracy **0.291**, macro-F1 **0.239**
 
-Speaker notes: `reports/DEFENSE.md`
+## Labeling
 
-## Honest implementation notes
-
-- `polarity_T_hat` is CLIP smile/sad, not SmolVLM-caption polarity. `T̂` still feeds Dsem/Fvt.
-- Text polarity: XLM-R social-media head + negation/contrast + a short list of funeral/irony **formulas** (not a sentiment dictionary).
-- Taarof and cultural irony without text–image clash are out of the 5-class GDRM contract.
+- jsonl 1186; eval **1043** (excluded 141 bootstrap)
+- Current sarcasm in jsonl 133; eval sarcasm 122 (11 were bootstrap)
+- Old `relabel` Enter-confirm is **not** blind gold. Pending blind sarcasm: **133**
+- Overlap list: `datasets/iaa_overlap_ids.txt` (133 sarcasm + 100 non-sarcasm)
+- Kappa undefined until `datasets/iaa_second.jsonl` exists (`python tasks.py iaa`)
 
 ## Commands
 
 ```bash
-python tasks.py dashboard
+python tasks.py relabel --only sarcasm
+python tasks.py relabel --only all --ids-file datasets/iaa_overlap_ids.txt --out datasets/iaa_second.jsonl --annotator PERSON2
+python tasks.py iaa
 python tasks.py eval
+# H3 only (unsafe on this GPU):
+python tasks.py eval --heavy
 ```

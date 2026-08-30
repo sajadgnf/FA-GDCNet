@@ -30,9 +30,21 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
 
+from data.eval_set import slice_to_eval_set
 from data.schema import LABELS
 from inference.classifier import DEFAULT_DATASET, DEFAULT_FEATURES, compute_dataset_features
 from inference.gdrm import FEATURE_NAMES
+
+log = logging.getLogger(__name__)
+
+DEFAULT_ABLATION_CSV = Path("reports") / "ablation.csv"
+DEFAULT_ABLATION_PNG = Path("reports") / "ablation.png"
+
+CORE_SIGNALS: tuple[str, ...] = ("Dsem", "Dsen", "Fvt")
+AUX_SIGNALS: tuple[str, ...] = ("cos_TI", "polarity_T", "polarity_T_hat")
+# Dsen and polarity_T_hat are CLIP smile/sad. This subset is the non-CLIP columns.
+NO_CLIP: tuple[str, ...] = ("Dsem", "Fvt", "cos_TI", "polarity_T")
+SARCASM_LABELS = ("positive_sarcasm", "negative_sarcasm")
 
 log = logging.getLogger(__name__)
 
@@ -55,10 +67,11 @@ def _column_idx(feature_subset: tuple[str, ...]) -> list[int]:
     return [name_to_idx[n] for n in feature_subset]
 
 
-def _eval(X: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+def _eval(X: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
     accs: list[float] = []
     f1s: list[float] = []
+    sarc: list[float] = []
     for train_idx, test_idx in skf.split(X, y):
         clf = LogisticRegression(
             class_weight="balanced",
@@ -71,41 +84,49 @@ def _eval(X: np.ndarray, y: np.ndarray) -> tuple[float, float]:
         preds = clf.predict(X[test_idx])
         accs.append(accuracy_score(y[test_idx], preds))
         f1s.append(f1_score(y[test_idx], preds, average="macro", labels=list(LABELS)))
-    return float(np.mean(accs)), float(np.mean(f1s))
+        sarc.append(
+            f1_score(
+                y[test_idx],
+                preds,
+                average="macro",
+                labels=list(SARCASM_LABELS),
+                zero_division=0,
+            )
+        )
+    return float(np.mean(accs)), float(np.mean(f1s)), float(np.mean(sarc))
+
+
+def _row(name: str, n: int, acc: float, f1: float, sarc: float) -> dict:
+    return {
+        "configuration": name,
+        "n_features": n,
+        "mean_accuracy": acc,
+        "mean_macro_f1": f1,
+        "mean_sarcasm_f1": sarc,
+    }
 
 
 def run(X: np.ndarray, y: np.ndarray) -> list[dict]:
     aux_idx = _column_idx(AUX_SIGNALS)
     rows: list[dict] = []
-    acc, f1 = _eval(X[:, sorted(aux_idx)], y)
-    rows.append(
-        {
-            "configuration": "aux_only",
-            "n_features": len(aux_idx),
-            "mean_accuracy": acc,
-            "mean_macro_f1": f1,
-        }
-    )
-    log.info("subset=aux_only mean_macro_f1=%.4f", f1)
+    acc, f1, sarc = _eval(X[:, sorted(aux_idx)], y)
+    rows.append(_row("aux_only", len(aux_idx), acc, f1, sarc))
+    log.info("subset=aux_only mean_macro_f1=%.4f sarcasm_f1=%.4f", f1, sarc)
+    no_clip_idx = _column_idx(NO_CLIP)
+    acc, f1, sarc = _eval(X[:, sorted(no_clip_idx)], y)
+    rows.append(_row("no_clip", len(no_clip_idx), acc, f1, sarc))
+    log.info("subset=no_clip mean_macro_f1=%.4f sarcasm_f1=%.4f", f1, sarc)
     for subset in _powerset(CORE_SIGNALS):
         cols = sorted(_column_idx(subset) + aux_idx)
-        Xs = X[:, cols]
-        acc, f1 = _eval(Xs, y)
-        rows.append(
-            {
-                "configuration": "+".join(subset),
-                "n_features": len(cols),
-                "mean_accuracy": acc,
-                "mean_macro_f1": f1,
-            }
-        )
+        acc, f1, sarc = _eval(X[:, cols], y)
+        rows.append(_row("+".join(subset), len(cols), acc, f1, sarc))
         log.info("subset=%s mean_macro_f1=%.4f", "+".join(subset), f1)
     return rows
 
 
 def write_csv(rows: list[dict], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["configuration", "n_features", "mean_accuracy", "mean_macro_f1"]
+    fields = ["configuration", "n_features", "mean_accuracy", "mean_macro_f1", "mean_sarcasm_f1"]
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -143,9 +164,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.features_cache.exists():
         npz = np.load(args.features_cache, allow_pickle=True)
-        X, y = npz["X"], npz["y"]
+        ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
+        X, y, _, _ = slice_to_eval_set(args.dataset, npz["X"], npz["y"], ids)
     else:
-        X, y, _ = compute_dataset_features(args.dataset, cache_path=args.features_cache)
+        X, y, ids = compute_dataset_features(args.dataset, cache_path=args.features_cache)
+        X, y, _, _ = slice_to_eval_set(args.dataset, X, y, list(ids))
 
     rows = run(X, y)
     write_csv(rows, args.csv)
