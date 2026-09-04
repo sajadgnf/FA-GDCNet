@@ -35,8 +35,9 @@ Thumbs.db
 # Downloaded model weights (use scripts/fetch_mclip.py)
 models/
 
-# Project data — DO NOT COMMIT scraped Instagram media (TOS).
-# JSONL/TXT metadata under datasets/raw/ may be tracked; images must stay local.
+datasets/raw/pw_ig_profile/
+datasets/raw/ig_storage_state.json
+datasets/raw/*.session
 datasets/raw/**/*.jpg
 datasets/raw/**/*.jpeg
 datasets/raw/**/*.webp

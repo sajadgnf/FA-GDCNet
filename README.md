@@ -71,6 +71,8 @@ python tasks.py extract
 ```powershell
 python tasks.py scrape-session --user YOUR_IG_USERNAME --browser firefox
 python tasks.py scrape --following --max-count 200 --session-user YOUR_IG_USERNAME
+python tasks.py enqueue-sarcasm
+python tasks.py relabel --only candidates --ids-file datasets/sarcasm_candidate_ids.txt
 python tasks.py relabel --export-overlap
 python tasks.py relabel --only sarcasm
 python tasks.py finish
@@ -94,6 +96,8 @@ python tasks.py scrape --profiles-file datasets/raw/accounts.txt --max-count 200
 ```
 
 اگر اسکرپ ممکن نیست، از `python scripts/proposal_demo.py` برای آزمایش بقیه مراحل استفاده کنید.
+
+**کنایه بیشتر:** `python tasks.py enqueue-sarcasm` پست‌های استخر را برای بازبینی کور صف می‌کند؛ برچسب کنایه خودکار نمی‌زند. سپس `python tasks.py relabel --only candidates --ids-file datasets/sarcasm_candidate_ids.txt`. تا وقتی `blind-relabel` نخورد، ردیف‌های جدید در ارزیابی نیستند.
 
 **برچسب‌گذاری (کور):** `python tasks.py relabel --only sarcasm` برچسب فعلی را نشان نمی‌دهد و Enter تأیید نیست؛ باید ۱–۵ بزنید. `relabel` قدیمی (Enter روی تگ ماشین) به‌عنوان برچسب انسانی حساب نمی‌شود. برای کپا:
 
@@ -222,8 +226,9 @@ Tests that exercise the heavy backbones (`tests/test_pipeline.py`, parts of `tes
 | `python tasks.py scrape --following --max-count N` | Scrape recent posts from accounts you follow.                      |
 | `python tasks.py scrape --profile USER`            | Scrape a specific account.                                         |
 | `python tasks.py scrape-session --user USER`       | Import Instagram session from browser cookies.                     |
-| `python tasks.py relabel`                           | Blind 5-class review (label hidden; 1–5 required). `--only sarcasm` by default. |
+| `python tasks.py enqueue-sarcasm`                   | Queue scrape-pool posts for blind sarcasm review (no auto gold). |
+| `python tasks.py relabel --only candidates`         | Blind-review the candidate queue (label hidden; 1–5 required). |
 | `python tasks.py relabel --export-overlap`          | Write sarcasm + 100 non-sarcasm ids for a second annotator. |
 | `python tasks.py iaa`                               | Kappa from gold `blind-relabel` vs `datasets/iaa_second.jsonl`. |
 | `python tasks.py label`                             | Rebuild labels from the raw pool (do **not** run on the defense dataset). |
-| `python tasks.py augment-sarcasm`                  | Append weak-labeled sarcasm posts from the archive pool.           |
+| `python tasks.py augment-sarcasm`                   | Deprecated alias of `enqueue-sarcasm`. |

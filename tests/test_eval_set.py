@@ -71,3 +71,18 @@ def test_slice_records_skips_extra_cache_rows(tmp_path):
     assert list(y) == ["neutral", "negative"]
     assert float(X[0, 0]) == 1.0
     assert float(X[1, 0]) == 3.0
+
+
+def test_slice_records_missing_id_returns_none(tmp_path):
+    cache = tmp_path / "feat.npz"
+    np.savez_compressed(
+        cache,
+        X=np.array([[1.0, 0.0]], dtype=np.float32),
+        y=np.array(["positive"], dtype=object),
+        post_ids=np.array(["a"], dtype=object),
+    )
+    records = [
+        DatasetRecord("a", "t", "i.jpg", "positive", ["sjjd6502"]),
+        DatasetRecord("new", "t", "i.jpg", "positive_sarcasm", ["sjjd6502"]),
+    ]
+    assert slice_records_from_cache(cache, records) is None

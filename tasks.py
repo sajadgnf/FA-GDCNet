@@ -175,6 +175,10 @@ def cmd_collect_hashtags(args: argparse.Namespace) -> int:
         extra.append("--sarcasm-candidates")
     if getattr(args, "delay", None) is not None:
         extra += ["--delay", str(args.delay)]
+    if getattr(args, "timeout", None) is not None:
+        extra += ["--timeout", str(args.timeout)]
+    if getattr(args, "min_face_size", None) is not None:
+        extra += ["--min-face-size", str(args.min_face_size)]
     if getattr(args, "headed", False):
         extra.append("--headed")
     if getattr(args, "scrolls", None) is not None:
@@ -187,6 +191,8 @@ def cmd_collect_hashtags(args: argparse.Namespace) -> int:
         extra.append("--hashtag-contains")
     if getattr(args, "max_search_tags", None) is not None:
         extra += ["--max-search-tags", str(args.max_search_tags)]
+    if getattr(args, "login_wait", None) is not None:
+        extra += ["--login-wait", str(args.login_wait)]
     return _run("data.collect_browser", *extra)
 
 
@@ -230,6 +236,25 @@ def cmd_relabel(args: argparse.Namespace) -> int:
     return _run("data.relabel", *extra)
 
 
+def cmd_enqueue_sarcasm(args: argparse.Namespace) -> int:
+    extra: list[str] = []
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    if args.ids_file:
+        extra += ["--ids-file", args.ids_file]
+    if args.max_queue is not None:
+        extra += ["--max", str(args.max_queue)]
+    if args.no_gold_heuristic:
+        extra.append("--no-gold-heuristic")
+    if getattr(args, "from_pools_only", False):
+        extra.append("--from-pools-only")
+    for pool in getattr(args, "unfiltered_pool", None) or []:
+        extra += ["--unfiltered-pool", str(pool)]
+    if args.dry_run:
+        extra.append("--dry-run")
+    return _run("data.enqueue_sarcasm", *extra)
+
+
 def cmd_iaa(args: argparse.Namespace) -> int:
     extra: list[str] = ["--gold-annotator", args.gold_annotator]
     if args.dataset:
@@ -259,6 +284,50 @@ def cmd_retag(args: argparse.Namespace) -> int:
     if args.dataset:
         extra += ["--dataset", args.dataset]
     return _run("data.retag_dataset", *extra)
+
+
+def cmd_drop_unreviewed(args: argparse.Namespace) -> int:
+    extra: list[str] = []
+    if args.dataset:
+        extra += ["--dataset", args.dataset]
+    if args.ids_file:
+        extra += ["--ids-file", args.ids_file]
+    for pool in getattr(args, "pool", None) or []:
+        extra += ["--pool", str(pool)]
+    if args.keep_images:
+        extra.append("--keep-images")
+    if args.dry_run:
+        extra.append("--dry-run")
+    return _run("data.drop_unreviewed", *extra)
+
+
+def cmd_craft_sarcasm(args: argparse.Namespace) -> int:
+    extra: list[str] = ["--pool-name", args.pool_name]
+    if args.out_dir:
+        extra += ["--out-dir", args.out_dir]
+    if args.timeout is not None:
+        extra += ["--timeout", str(args.timeout)]
+    if args.no_require_face:
+        extra.append("--no-require-face")
+    if getattr(args, "from_existing", False):
+        extra.append("--from-existing")
+    if getattr(args, "recaption_queue", False):
+        extra.append("--recaption-queue")
+    if getattr(args, "pending_only", False):
+        extra.append("--pending-only")
+    if getattr(args, "from_labeled", False):
+        extra.append("--from-labeled")
+    if getattr(args, "no_clip_gate", False):
+        extra.append("--no-clip-gate")
+    if getattr(args, "min_clip", None) is not None:
+        extra += ["--min-clip", str(args.min_clip)]
+    if getattr(args, "dataset", None):
+        extra += ["--dataset", args.dataset]
+    if getattr(args, "max_n", None) is not None:
+        extra += ["--max", str(args.max_n)]
+    if getattr(args, "replace", False):
+        extra.append("--replace")
+    return _run("data.craft_sarcasm", *extra)
 
 
 def cmd_prune_pool(args: argparse.Namespace) -> int:
@@ -304,6 +373,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
     rc = _run("eval.baseline")
     if rc != 0:
         return rc
+    rc = _run("eval.origin_split")
+    if rc != 0:
+        return rc
     if getattr(args, "heavy", False):
         rc = _run("eval.heavy_baseline")
         if rc != 0:
@@ -320,18 +392,6 @@ def cmd_finish(_: argparse.Namespace) -> int:
     if rc != 0:
         return rc
     return cmd_eval(_)
-
-
-def cmd_augment_sarcasm(args: argparse.Namespace) -> int:
-    extra: list[str] = []
-    if args.dataset:
-        extra += ["--dataset", args.dataset]
-    if args.dry_run:
-        extra.append("--dry-run")
-    return subprocess.call(
-        [sys.executable, str(ROOT / "scripts" / "augment_sarcasm.py"), *extra],
-        cwd=str(ROOT),
-    )
 
 
 def cmd_dashboard(_: argparse.Namespace) -> int:
@@ -449,9 +509,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_collect.add_argument(
         "--sarcasm-candidates",
         action="store_true",
-        help="Skip plain selfie captions; keep posts with irony/sarcasm text cues.",
+        help="Skip captions with no polarity-clash cue (not irony hashtags alone).",
     )
     p_collect.add_argument("--delay", type=float, default=8.0)
+    p_collect.add_argument(
+        "--timeout",
+        type=float,
+        default=20.0,
+        help="Per-post fetch timeout in seconds (default 20).",
+    )
+    p_collect.add_argument("--min-face-size", type=int, default=40)
     p_collect.add_argument("--browser", default="firefox")
     p_collect.add_argument(
         "--headed",
@@ -470,6 +537,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=15,
         help="Max tags per search term when using --hashtag-contains or ?prefix (default 15).",
+    )
+    p_collect.add_argument(
+        "--login-wait",
+        type=int,
+        default=180,
+        help="Seconds to wait for Instagram login when --headed. 0 = wait until login.",
     )
     p_collect.set_defaults(func=cmd_collect_hashtags)
 
@@ -490,7 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_relabel.add_argument(
         "--only",
-        choices=("all", "sarcasm", "positive", "negative", "neutral"),
+        choices=("all", "sarcasm", "candidates", "positive", "negative", "neutral"),
         default="sarcasm",
     )
     p_relabel.add_argument("--start", type=int, default=0)
@@ -559,6 +632,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_prune.add_argument("--dry-run", action="store_true")
     p_prune.set_defaults(func=cmd_prune_pool)
 
+    p_drop = sub.add_parser(
+        "drop-unreviewed",
+        help="Delete unlabeled bootstrap candidates from gold (keep human 1–5 labels).",
+    )
+    p_drop.add_argument("--dataset", default=None)
+    p_drop.add_argument(
+        "--ids-file",
+        default=None,
+        help="Only drop these ids (default: all unreviewed bootstrap).",
+    )
+    p_drop.add_argument(
+        "--pool",
+        action="append",
+        default=None,
+        help="Raw pool JSONL to strip (repeatable). Default: datasets/raw/sarcasm.jsonl",
+    )
+    p_drop.add_argument("--keep-images", action="store_true")
+    p_drop.add_argument("--dry-run", action="store_true")
+    p_drop.set_defaults(func=cmd_drop_unreviewed)
+
+    p_craft = sub.add_parser(
+        "craft-sarcasm",
+        help="Download face photos and pair them with clash captions (still unlabeled).",
+    )
+    p_craft.add_argument("--out-dir", default="datasets/raw")
+    p_craft.add_argument("--pool-name", default="crafted")
+    p_craft.add_argument("--timeout", type=float, default=30.0)
+    p_craft.add_argument("--no-require-face", action="store_true")
+    p_craft.add_argument(
+        "--from-existing",
+        action="store_true",
+        help="Recaption Instagram faces already on disk (no download).",
+    )
+    p_craft.add_argument("--replace", action="store_true")
+    p_craft.add_argument(
+        "--from-labeled",
+        action="store_true",
+        help="Recaption faces from labeled positive/negative gold with clash captions.",
+    )
+    p_craft.add_argument("--dataset", default="datasets/persian_multimodal_irony.jsonl")
+    p_craft.add_argument("--max", type=int, default=120, dest="max_n")
+    p_craft.add_argument("--no-clip-gate", action="store_true")
+    p_craft.add_argument("--min-clip", type=float, default=None)
+    p_craft.add_argument("--recaption-queue", action="store_true")
+    p_craft.add_argument(
+        "--pending-only",
+        action="store_true",
+        help="With --recaption-queue, do not rewrite already-labeled rows.",
+    )
+    p_craft.set_defaults(func=cmd_craft_sarcasm)
+
     p_boot = sub.add_parser(
         "label-bootstrap",
         help="Weak-label scraped raw pool with ParsBERT (positive/negative/neutral).",
@@ -610,11 +734,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_aug = sub.add_parser(
         "augment-sarcasm",
-        help="Append weak-labeled sarcasm posts from the raw archive pool.",
+        help="Deprecated alias of enqueue-sarcasm (does not assign sarcasm gold).",
     )
     p_aug.add_argument("--dataset", default=None)
+    p_aug.add_argument("--ids-file", default=None)
+    p_aug.add_argument("--max", type=int, default=None, dest="max_queue")
+    p_aug.add_argument("--no-gold-heuristic", action="store_true")
     p_aug.add_argument("--dry-run", action="store_true")
-    p_aug.set_defaults(func=cmd_augment_sarcasm)
+    p_aug.set_defaults(func=cmd_enqueue_sarcasm)
+
+    p_enq = sub.add_parser(
+        "enqueue-sarcasm",
+        help="Queue scrape-pool posts for blind sarcasm review (no auto labels).",
+    )
+    p_enq.add_argument("--dataset", default=None)
+    p_enq.add_argument("--ids-file", default=None)
+    p_enq.add_argument("--max", type=int, default=None, dest="max_queue")
+    p_enq.add_argument("--no-gold-heuristic", action="store_true")
+    p_enq.add_argument("--from-pools-only", action="store_true")
+    p_enq.add_argument(
+        "--unfiltered-pool",
+        action="append",
+        default=None,
+        help="Raw JSONL to import without caption filter.",
+    )
+    p_enq.add_argument("--dry-run", action="store_true")
+    p_enq.set_defaults(func=cmd_enqueue_sarcasm)
 
     sub.add_parser("dashboard").set_defaults(func=cmd_dashboard)
     return parser

@@ -53,6 +53,7 @@ FEATURE_FA: dict[str, str] = {
     "cos_TI": "شباهت متن–تصویر",
     "polarity_T": "قطبیت متن",
     "polarity_T_hat": "قطبیت تصویر",
+    "clash": "تضاد قطبیت",
 }
 
 FEATURE_HINT: dict[str, str] = {
@@ -62,6 +63,7 @@ FEATURE_HINT: dict[str, str] = {
     "cos_TI": "شباهت کسینوسی متن و تصویر",
     "polarity_T": "امتیاز احساس متن (−۱ تا +۱)",
     "polarity_T_hat": "حال چهره در تصویر از CLIP (−۱ تا +۱)، نه قطبیت جملهٔ SmolVLM",
+    "clash": "حاصل‌ضرب منفی قطبیت متن و چهره: مثبت یعنی متن و صورت مخالف‌اند",
 }
 
 AGENT_CARDS = (
@@ -808,11 +810,11 @@ def _apply_polarity_contract(
     """Re-apply the clash rule so a stale dashboard result cannot keep false sarcasm."""
     import numpy as np
 
-    from inference.gdrm import DiscrepancyFeatures
+    from inference.gdrm import CORE_FEATURE_NAMES, DiscrepancyFeatures
     from inference.pipeline import refine_label_for_polarity_conflict
 
     feats = DiscrepancyFeatures(
-        **{name: float(features.get(name, 0.0)) for name in FEATURE_NAMES}
+        **{name: float(features.get(name, 0.0)) for name in CORE_FEATURE_NAMES}
     )
     proba = np.full(len(LABELS), 0.05, dtype=np.float32)
     if label in LABELS:

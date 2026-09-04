@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from data.schema import LABELS
-from inference.gdrm import build_feature_vector
+from inference.gdrm import FEATURE_NAMES, build_feature_vector
 from inference.pipeline import Pipeline
 
 
@@ -22,7 +22,7 @@ class _FakeSklearnModel:
         self._proba = np.asarray(fixed_proba, dtype=np.float32)
 
     def predict_proba(self, X):
-        assert X.shape == (1, 6)
+        assert X.shape == (1, len(FEATURE_NAMES))
         return self._proba.reshape(1, -1)
 
 
@@ -33,7 +33,7 @@ def _make_clf_pack(*, target_label: str, confidence: float = 0.81) -> dict:
     return {
         "model": _FakeSklearnModel(LABELS, proba),
         "classifier_name": "Fake",
-        "feature_names": ["Dsem", "Dsen", "Fvt", "cos_TI", "polarity_T", "polarity_T_hat"],
+        "feature_names": list(FEATURE_NAMES),
         "label_order": list(LABELS),
     }
 
@@ -284,9 +284,7 @@ def test_predict_from_features_discrepancy_vector_keys():
     pack = _make_clf_pack(target_label="negative")
     pipeline = Pipeline(bundle=_FakeBundle(), clf_pack=pack)
     pred = pipeline.predict_from_features(_make_features())
-    assert set(pred.discrepancy_vector) == {
-        "Dsem", "Dsen", "Fvt", "cos_TI", "polarity_T", "polarity_T_hat"
-    }
+    assert set(pred.discrepancy_vector) == set(FEATURE_NAMES)
 
 
 def test_predict_from_features_handles_classifier_with_subset_of_labels():
@@ -295,7 +293,7 @@ def test_predict_from_features_handles_classifier_with_subset_of_labels():
     pack = {
         "model": _FakeSklearnModel(["positive", "negative"], proba),
         "classifier_name": "Fake",
-        "feature_names": ["Dsem", "Dsen", "Fvt", "cos_TI", "polarity_T", "polarity_T_hat"],
+        "feature_names": list(FEATURE_NAMES),
         "label_order": list(LABELS),
     }
     pipeline = Pipeline(bundle=_FakeBundle(), clf_pack=pack)

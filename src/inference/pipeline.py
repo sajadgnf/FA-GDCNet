@@ -5,7 +5,7 @@ returns a `Prediction` containing:
 
 - `label`: one of `LABELS`
 - `confidence`: probability of the chosen label in [0, 1]
-- `discrepancy_vector`: dict view of the 6-feature GDRM output
+- `discrepancy_vector`: dict view of the GDRM output (core signals + clash)
 - `low_fidelity`: True iff `Fvt < tau` (spec hallucination guard)
 
 The backbones are loaded once and cached on the `Pipeline` instance so a

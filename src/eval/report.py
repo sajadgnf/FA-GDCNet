@@ -29,6 +29,7 @@ DEFAULT_ABLATION_PNG = Path("reports") / "ablation.png"
 DEFAULT_ABLATION_CSV = Path("reports") / "ablation.csv"
 DEFAULT_CONFUSION_PNG = Path("reports") / "confusion.png"
 DEFAULT_HEAVY = Path("reports") / "heavy_compare.json"
+DEFAULT_ORIGIN_SPLIT = Path("reports") / "origin_split.json"
 DEFAULT_OUT = Path("reports") / "REPORT.md"
 
 SARCASM_LABELS = ("positive_sarcasm", "negative_sarcasm")
@@ -85,13 +86,20 @@ def _read_footer_value(rows: list[dict], key: str) -> str | None:
 
 
 def _read_sarcasm_mean(rows: list[dict]) -> float:
+    val = _read_footer_value(rows, "mean_accuracy_clash_rule")
+    if val:
+        return float(val)
     val = _read_footer_value(rows, "mean_accuracy_dsem_rule")
     if val:
         return float(val)
     for r in rows:
         if str(r.get("fold")) == "mean±std":
             try:
-                col = r.get("dsem_rule_accuracy") or r.get("accuracy")
+                col = (
+                    r.get("clash_rule_accuracy")
+                    or r.get("dsem_rule_accuracy")
+                    or r.get("accuracy")
+                )
                 return float(str(col).split("±")[0])
             except (ValueError, TypeError, AttributeError):
                 return 0.0
@@ -131,6 +139,7 @@ def render_report(
     ablation_csv: Path = DEFAULT_ABLATION_CSV,
     confusion_png: Path = DEFAULT_CONFUSION_PNG,
     heavy_compare_json: Path = DEFAULT_HEAVY,
+    origin_split_json: Path = DEFAULT_ORIGIN_SPLIT,
 ) -> str:
     metrics = _read_csv(metrics_csv)
     baseline = _read_csv(baseline_csv)
@@ -146,6 +155,11 @@ def render_report(
     heavy = (
         json.loads(heavy_compare_json.read_text(encoding="utf-8"))
         if heavy_compare_json.exists()
+        else {}
+    )
+    origin = (
+        json.loads(origin_split_json.read_text(encoding="utf-8"))
+        if origin_split_json.exists()
         else {}
     )
 
@@ -259,14 +273,38 @@ def render_report(
 
     mm_bin = _read_sarcasm_mean(sarcasm_rows)
     bs_bin = _read_sarcasm_mean(baseline_sarcasm_rows)
-    bin_delta = mm_bin - bs_bin
-    bin_passes = mm_bin >= SARCASM_ACC_FLOOR
+    clash_f1 = _read_footer_value(sarcasm_rows, "mean_f1_clash_rule")
+    clash_p = _read_footer_value(sarcasm_rows, "mean_precision_clash_rule")
+    clash_r = _read_footer_value(sarcasm_rows, "mean_recall_clash_rule")
+    pdf_bar_flag = _read_footer_value(sarcasm_rows, "pdf_accuracy_bar")
+    beats_dummy_flag = _read_footer_value(sarcasm_rows, "beats_dummy_accuracy")
+    if pdf_bar_flag in ("true", "false"):
+        pdf_bar = pdf_bar_flag == "true"
+    else:
+        pdf_bar = mm_bin >= SARCASM_ACC_FLOOR
+    dummy_footer = _read_footer_value(sarcasm_rows, "dummy_not_sarcasm_accuracy")
+    if beats_dummy_flag in ("true", "false"):
+        beats_dummy = beats_dummy_flag == "true"
+    else:
+        try:
+            beats_dummy = mm_bin > float(dummy_footer) + 1e-6 if dummy_footer else False
+        except (TypeError, ValueError):
+            beats_dummy = False
     lines.append("## Binary sarcasm detection (proposal Hypothesis 2)")
     lines.append("")
+    clash_acc = _read_footer_value(sarcasm_rows, "mean_accuracy_clash_rule")
     lines.append(
-        "- Dsem threshold rule (CV-tuned, interpretable): "
-        f"**{_read_footer_value(sarcasm_rows, 'mean_accuracy_dsem_rule') or f'{mm_bin:.4f}'}**"
+        "- Clash rule (CV-tuned for F1, opposite text vs face polarity): "
+        f"accuracy **{clash_acc or f'{mm_bin:.4f}'}**"
+        + (f", precision **{clash_p}**" if clash_p else "")
+        + (f", recall **{clash_r}**" if clash_r else "")
+        + (f", F1 **{clash_f1}**" if clash_f1 else "")
     )
+    dsem_acc = _read_footer_value(sarcasm_rows, "mean_accuracy_dsem_rule")
+    if dsem_acc:
+        lines.append(
+            f"- Dsem accuracy cut (dummy-trap footnote, not the H2 detector): **{dsem_acc}**"
+        )
     logreg_f1 = _sarcasm_binary_f1(sarcasm_rows)
     logreg_acc = _read_footer_value(sarcasm_rows, "mean_accuracy_logreg")
     if logreg_acc or logreg_f1:
@@ -280,20 +318,23 @@ def render_report(
     n_ps = _read_footer_value(metrics, "n_positive_sarcasm")
     n_ns = _read_footer_value(metrics, "n_negative_sarcasm")
     n_tot = _read_footer_value(metrics, "n_samples")
-    dummy_not_sarc = ""
+    dummy_not_sarc = dummy_footer or ""
     try:
-        if n_ps and n_ns and n_tot:
+        if not dummy_not_sarc and n_ps and n_ns and n_tot:
             dummy_not_sarc = f"{1.0 - (float(n_ps) + float(n_ns)) / float(n_tot):.4f}"
     except (TypeError, ValueError, ZeroDivisionError):
-        dummy_not_sarc = ""
+        dummy_not_sarc = dummy_not_sarc or ""
     lines.append(f"- Unimodal baseline binary accuracy: **{bs_bin:.4f}**")
     if dummy_not_sarc:
         lines.append(
             f"- Always-not-sarcasm dummy accuracy: **{dummy_not_sarc}** "
-            f"(H2 letter-pass does not imply beating this dummy)."
+            f"(sarcasm-class F1 of this dummy is 0)."
         )
     lines.append(
-        f"- Meets ≥70% accuracy (Dsem rule): **{'YES' if bin_passes else 'NO'}**"
+        f"- PDF §6.3(2) letter (clash accuracy ≥70%): **{'YES' if pdf_bar else 'NO'}**"
+    )
+    lines.append(
+        f"- Beats always-not-sarcasm accuracy: **{'YES' if beats_dummy else 'NO'}**"
     )
     lines.append("")
 
@@ -358,12 +399,56 @@ def render_report(
                 )
             lines.append("")
             lines.append(
-                "`aux_only` is `cos_TI` + `polarity_T` + `polarity_T_hat`. "
+                "`aux_only` is `cos_TI` + `polarity_T` + `polarity_T_hat` + `clash`. "
                 "`no_clip` is `Dsem`+`Fvt`+`cos_TI`+`polarity_T` (drops CLIP "
-                "`polarity_T_hat` and `Dsen`). PDF §8.3 required showing that "
+                "`polarity_T_hat`, `Dsen`, and `clash`). PDF §8.3 required showing that "
                 "Dsem and Dsen improve the final model. If `aux_only` matches or "
-                "beats the full six-feature row, that contribution is **not shown**. "
+                "beats the full GDRM row, that contribution is **not shown**. "
                 "If `no_clip` sarcasm-F1 collapses, subtype F1 depended on CLIP."
+            )
+            lines.append("")
+
+    if origin.get("splits"):
+        lines.append("## Organic vs crafted captions (domain split)")
+        lines.append("")
+        lines.append(
+            "Retrain 5-fold CV on each subset. `craft-*` ids are recaptioned faces, "
+            "not Instagram caption–image pairs. OOF slice is mixed-train and can leak."
+        )
+        lines.append("")
+        lines.append(
+            "| split | n | sarcasm | clash P / R / F1 | clash acc | beats dummy acc | RQ2 Δ |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for name in ("all", "organic", "crafted"):
+            split = (origin.get("splits") or {}).get(name) or {}
+            binary = split.get("binary") or {}
+            clash = binary.get("clash") or {}
+            f1 = (clash.get("f1") or {}).get("mean")
+            p = (clash.get("precision") or {}).get("mean")
+            r = (clash.get("recall") or {}).get("mean")
+            acc = (clash.get("accuracy") or {}).get("mean")
+            prf = (
+                f"{p:.3f} / {r:.3f} / {f1:.3f}"
+                if f1 is not None and p is not None and r is not None
+                else "—"
+            )
+            acc_s = f"{acc:.4f}" if acc is not None else "—"
+            beats = clash.get("beats_dummy_accuracy")
+            beats_s = {True: "YES", False: "NO"}.get(beats, "—")
+            split_delta = split.get("rq2_delta")
+            delta_s = f"{split_delta:+.3f}" if split_delta is not None else "—"
+            lines.append(
+                f"| {name} | {split.get('n', '')} | {split.get('n_sarcasm', '')} | "
+                f"{prf} | {acc_s} | {beats_s} | {delta_s} |"
+            )
+        lines.append("")
+        org_delta = origin.get("organic_rq2_delta")
+        org_ok = origin.get("organic_rq2_meets_10pp")
+        if org_delta is not None:
+            lines.append(
+                f"- Organic-only RQ2 Δ: **{org_delta:+.4f}** "
+                f"({'meets' if org_ok else 'does not meet'} ≥10 pp)."
             )
             lines.append("")
 
@@ -386,6 +471,16 @@ def render_report(
         if heavy.get("note"):
             lines.append(f"- {heavy['note']}")
         lines.append(f"- Hypothesis 3: **{h3}**")
+        n_h3 = heavy.get("n_samples") or 0
+        try:
+            n_h3_i = int(n_h3)
+        except (TypeError, ValueError):
+            n_h3_i = 0
+        if heavy.get("underpowered") or n_h3_i < 30:
+            lines.append(
+                "- This run does **not** settle H3: sample size is too small "
+                "(or the load failed on a larger n)."
+            )
         lines.append("")
 
     lines.append("## Proposal hypotheses (PDF §6.3)")
@@ -399,11 +494,12 @@ def render_report(
         if profile_staged
         else "| H1 memory < 1 GiB (staged peak) | _not measured_ |"
     )
-    h2_note = f"{mm_bin:.1%}"
+    h2_note = f"letter {'YES' if pdf_bar else 'NO'} ({mm_bin:.1%})"
     if dummy_not_sarc:
-        h2_note += f"; always-not-sarcasm dummy {dummy_not_sarc}"
+        h2_note += f"; dummy {dummy_not_sarc}; beats dummy {'YES' if beats_dummy else 'NO'}"
     lines.append(
-        f"| H2 sarcasm accuracy > 70% (Dsem rule) | **{'YES' if bin_passes else 'NO'}** ({h2_note}) |"
+        f"| H2 sarcasm accuracy > 70% | **{'YES' if beats_dummy else 'NO as detection'}** "
+        f"({h2_note}) |"
     )
     lines.append(f"| H3 vs heavy model (<1 GiB, faster, drop <5%) | **{h3}** |")
     lines.append(
@@ -414,7 +510,27 @@ def render_report(
     lines.append("| §8.3 Dsem/Dsen improve the model | see ablation (null if aux_only ≈ full) |")
     lines.append("")
 
-    lines.append("## How to read the scores (defense notes)")
+    lines.append("## Deviations from the proposal PDF")
+    lines.append("")
+    lines.append(
+        "- **ParsBERT** is named for Dsen (§8.1, §9). The text polarity head is "
+        "`cardiffnlp/twitter-xlm-roberta-base-sentiment`. Image polarity is CLIP "
+        "smile/sad, not ParsBERT on SmolVLM `T̂`."
+    )
+    lines.append(
+        "- **H1** is measured as staged extract (one backbone resident). The PDF "
+        "does not define staging. Dashboard with all towers loaded exceeds 1 GiB."
+    )
+    lines.append(
+        "- **§5** specifies Instagram text–image pairs. Crafted recaptions "
+        "(`craft-*`) keep the photo and replace the caption."
+    )
+    lines.append(
+        "- **§8.2 scenario 2** (implicit / common-knowledge sarcasm) is not evaluated."
+    )
+    lines.append("")
+
+    lines.append("## How to read the scores")
     lines.append("")
     lines.append(
         "- **5-class quality** is reported as **macro-F1**, not accuracy. "
@@ -422,10 +538,10 @@ def render_report(
         "dummy can beat overall accuracy while losing the rare classes."
     )
     lines.append(
-        "- **Hypothesis 2** is sarcasm **accuracy > 70%**. The Dsem rule is the "
-        "number stamped YES/NO against that bar. Always-not-sarcasm dummy "
-        "accuracy and binary F1 must be read with it. Beating 70% is not the "
-        "same as beating the dummy."
+        "- **Hypothesis 2** in the PDF is sarcasm **accuracy > 70%**. That bar can "
+        "be met by always predicting not-sarcasm when sarcasm is rare. Detection "
+        "evidence is precision/recall/F1 and whether accuracy beats the "
+        "always-not-sarcasm dummy. A previous F1≥0.40 conjunct was not in the PDF."
     )
     lines.append(
         "- **`polarity_T_hat`** in GDRM is **CLIP facial affect** (smile vs sad), "
@@ -436,11 +552,10 @@ def render_report(
         "omit expression)."
     )
     lines.append(
-        "- **Sarcasm-subtype F1** is still not independent of CLIP: "
-        "`polarity_T_hat` in the feature vector is the same smile/sad channel "
-        "that informed the original retag. One-human review of current sarcasm "
-        "rows reduces but does not remove that overlap. Kappa is undefined "
-        "without a second annotator."
+        "- **Sarcasm-subtype F1** can still use CLIP: `polarity_T_hat` is smile/sad "
+        "in the feature vector. Kappa, if computed, is only on the overlap file "
+        "vs gold `blind-relabel` rows (`reports/iaa.md`), not on the full eval set. "
+        "Most non-sarcasm eval rows were not blindly relabeled."
     )
     lines.append(
         "- **Neutral F1** is the weakest class (thin captions / ads). It is not the "
@@ -467,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ablation-csv", type=Path, default=DEFAULT_ABLATION_CSV)
     parser.add_argument("--confusion", type=Path, default=DEFAULT_CONFUSION_PNG)
     parser.add_argument("--heavy", type=Path, default=DEFAULT_HEAVY)
+    parser.add_argument("--origin-split", type=Path, default=DEFAULT_ORIGIN_SPLIT)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -482,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         ablation_csv=args.ablation_csv,
         confusion_png=args.confusion,
         heavy_compare_json=args.heavy,
+        origin_split_json=args.origin_split,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(body, encoding="utf-8")

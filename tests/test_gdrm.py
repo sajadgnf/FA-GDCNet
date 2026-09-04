@@ -296,9 +296,10 @@ def test_build_feature_vector_shape_and_names():
         polarity_probs_T_hat=pTh,
     )
     arr = f.as_array()
-    assert arr.shape == (6,)
+    assert arr.shape == (len(FEATURE_NAMES),)
     d = f.as_dict()
     assert tuple(d.keys()) == FEATURE_NAMES
+    assert f.clash == pytest.approx(-f.polarity_T * f.polarity_T_hat)
 
 
 def test_build_feature_vector_sarcasm_signature():
@@ -326,6 +327,7 @@ def test_build_feature_vector_sarcasm_signature():
     assert f.Fvt > 0.9             # but description still describes the image
     assert f.polarity_T > 0.5
     assert f.polarity_T_hat < -0.5
+    assert f.clash > 0.4
 
 
 def test_clip_style_image_polarity_moves_dsen():
@@ -348,3 +350,15 @@ def test_clip_style_image_polarity_moves_dsen():
 
 def test_default_fvt_threshold_is_documented():
     assert 0.0 < DEFAULT_FVT_THRESHOLD < 1.0
+
+
+def test_compute_clash_positive_when_polarities_oppose():
+    from inference.gdrm import compute_clash, with_clash_column
+
+    assert compute_clash(0.8, -0.7) == pytest.approx(0.56)
+    assert compute_clash(0.8, 0.7) == pytest.approx(-0.56)
+    six = np.array([[0.1, 0.2, 0.3, 0.4, 0.5, -0.4]], dtype=np.float32)
+    seven = with_clash_column(six)
+    assert seven.shape == (1, 7)
+    assert seven[0, 6] == pytest.approx(0.2)
+

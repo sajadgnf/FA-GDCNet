@@ -56,9 +56,10 @@ def _cache_matches_dataset(cache: Path, records: list) -> bool:
 
 def _compute_baseline_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray]:
     records = _usable_records(dataset)
-    sliced = slice_records_from_cache(cache, records)
-    if sliced is not None:
-        return sliced
+    if _cache_matches_dataset(cache, records):
+        sliced = slice_records_from_cache(cache, records)
+        if sliced is not None:
+            return sliced
     if cache.is_file():
         log.warning("baseline cache unusable vs %s; recomputing", dataset)
 
