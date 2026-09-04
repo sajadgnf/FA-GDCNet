@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 from .preprocess import is_persian_enough, is_spam_caption, preprocess_caption
+from .sarcasm_candidates import is_political_caption
 from .scrape import (
     DEFAULT_RAW_DIR,
     IGNORED_IDS_FILE,
@@ -134,6 +135,12 @@ def import_local_pool(
                 _remember_ignored(post_id)
                 seen.add(post_id)
                 continue
+            if caption and is_political_caption(caption):
+                skipped_spam += 1
+                _remember_ignored(post_id)
+                seen.add(post_id)
+                log.info("skip %s: political caption", post_id)
+                continue
 
             dest = image_dir / f"{post_id}{src.suffix.lower()}"
             if src.resolve() != dest.resolve():
@@ -142,7 +149,6 @@ def import_local_pool(
             if require_face and _image_has_face is not None:
                 if not _image_has_face(dest, min_size=min_face_size):
                     skipped_no_face += 1
-                    _remember_ignored(post_id)
                     seen.add(post_id)
                     dest.unlink(missing_ok=True)
                     log.debug("skip %s: no face detected", post_id)
@@ -159,11 +165,7 @@ def import_local_pool(
             log.info("imported %s", post_id)
 
     if skipped_no_face:
-        log.info(
-            "skipped %d images with no face (IDs saved to %s)",
-            skipped_no_face,
-            IGNORED_IDS_FILE,
-        )
+        log.info("skipped %d images with no face", skipped_no_face)
     if skipped_spam:
         log.info("skipped %d spam captions (IDs saved to %s)", skipped_spam, IGNORED_IDS_FILE)
     log.info("imported %d posts into %s", written, jsonl_path)

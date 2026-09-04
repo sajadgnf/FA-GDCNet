@@ -1,16 +1,16 @@
 """Ablation study over GDRM signals.
 
 Re-fits the lightweight classifier on each subset of GDRM signals from the
-6-feature vector. Subsets (per spec scenario *Single-signal and pairwise runs*):
+feature vector. Subsets (per spec scenario *Single-signal and pairwise runs*):
 
     {Dsem}, {Dsen}, {Fvt},
     {Dsem, Dsen}, {Dsem, Fvt}, {Dsen, Fvt},
     {Dsem, Dsen, Fvt}
 
-Auxiliary features (`cos_TI`, `polarity_T`, `polarity_T_hat`) are kept in every
-core-signal configuration. An extra `aux_only` row (those three columns, no
-Dsem/Dsen/Fvt) shows how much of the 5-class score already lives in the
-polarities — Dsen is partly redundant with `polarity_T` / `polarity_T_hat`.
+Auxiliary features (`cos_TI`, `polarity_T`, `polarity_T_hat`, `clash`) are kept
+in every core-signal configuration. `clash = -polarity_T * polarity_T_hat`.
+An extra `aux_only` row (those columns, no Dsem/Dsen/Fvt) shows how much of
+the 5-class score already lives in the polarities.
 
 Outputs:
 - `reports/ablation.csv` with one row per configuration.
@@ -33,7 +33,7 @@ from sklearn.model_selection import StratifiedKFold
 from data.eval_set import slice_to_eval_set
 from data.schema import LABELS
 from inference.classifier import DEFAULT_DATASET, DEFAULT_FEATURES, compute_dataset_features
-from inference.gdrm import FEATURE_NAMES
+from inference.gdrm import FEATURE_NAMES, with_clash_column
 
 log = logging.getLogger(__name__)
 
@@ -41,18 +41,10 @@ DEFAULT_ABLATION_CSV = Path("reports") / "ablation.csv"
 DEFAULT_ABLATION_PNG = Path("reports") / "ablation.png"
 
 CORE_SIGNALS: tuple[str, ...] = ("Dsem", "Dsen", "Fvt")
-AUX_SIGNALS: tuple[str, ...] = ("cos_TI", "polarity_T", "polarity_T_hat")
-# Dsen and polarity_T_hat are CLIP smile/sad. This subset is the non-CLIP columns.
+AUX_SIGNALS: tuple[str, ...] = ("cos_TI", "polarity_T", "polarity_T_hat", "clash")
+# Dsen, polarity_T_hat, and clash use CLIP smile/sad.
 NO_CLIP: tuple[str, ...] = ("Dsem", "Fvt", "cos_TI", "polarity_T")
 SARCASM_LABELS = ("positive_sarcasm", "negative_sarcasm")
-
-log = logging.getLogger(__name__)
-
-DEFAULT_ABLATION_CSV = Path("reports") / "ablation.csv"
-DEFAULT_ABLATION_PNG = Path("reports") / "ablation.png"
-
-CORE_SIGNALS: tuple[str, ...] = ("Dsem", "Dsen", "Fvt")
-AUX_SIGNALS: tuple[str, ...] = ("cos_TI", "polarity_T", "polarity_T_hat")
 
 
 def _powerset(items: tuple[str, ...]) -> list[tuple[str, ...]]:
@@ -107,6 +99,7 @@ def _row(name: str, n: int, acc: float, f1: float, sarc: float) -> dict:
 
 
 def run(X: np.ndarray, y: np.ndarray) -> list[dict]:
+    X = with_clash_column(X)
     aux_idx = _column_idx(AUX_SIGNALS)
     rows: list[dict] = []
     acc, f1, sarc = _eval(X[:, sorted(aux_idx)], y)
@@ -165,10 +158,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.features_cache.exists():
         npz = np.load(args.features_cache, allow_pickle=True)
         ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
-        X, y, _, _ = slice_to_eval_set(args.dataset, npz["X"], npz["y"], ids)
+        X, y, _, _ = slice_to_eval_set(
+            args.dataset, with_clash_column(npz["X"]), npz["y"], ids
+        )
     else:
         X, y, ids = compute_dataset_features(args.dataset, cache_path=args.features_cache)
-        X, y, _, _ = slice_to_eval_set(args.dataset, X, y, list(ids))
+        X, y, _, _ = slice_to_eval_set(
+            args.dataset, with_clash_column(X), y, list(ids)
+        )
 
     rows = run(X, y)
     write_csv(rows, args.csv)

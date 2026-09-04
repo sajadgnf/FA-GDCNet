@@ -1,39 +1,32 @@
 # Pipeline status
 
-Bars are PDF §6.3. n_eval = 1043 after dropping 141 `weak-sarcasm-bootstrap` rows.
+Numbers from `reports/REPORT.md` and `reports/origin_split.json`. Prefer those files.
 
 ## Proposal hypotheses
 
 | Item | Status |
 | --- | --- |
-| H1 memory < 1 GiB (staged peak) | **YES** — 0.945 GiB. Dashboard resident **4.176 GiB**. |
-| H2 sarcasm accuracy > 70% | **YES** on the written bar — Dsem **85.4%**. Always-not-sarcasm dummy **88.3%**. Binary F1 **0.46**. |
-| H3 vs heavy model | **NOT_RUN**. Qwen2-VL-2B crashed on load (0xC0000005). Not PASS. Use `python tasks.py eval --heavy` only on other hardware. |
-| RQ2 sarcasm F1 ≥10 pp vs unimodal | **YES** on the **current** gold: multimodal **0.514** vs text polarity **0.250** (**+26.4 pp**). Still not independent of CLIP in features. |
-| §8.3 Dsem/Dsen improve 5-class | **Not shown.** `aux_only` macro-F1 **0.487** > full six **0.480**. |
-| Circularity (`no_clip` = drop CLIP hat + Dsen) | sarcasm-F1 **0.258** vs `aux_only` **0.497**. Subtype F1 depends on CLIP. |
+| H1 memory < 1 GiB (staged peak) | **YES** if “method” = staged extract — 0.945 GiB. Dashboard **4.176 GiB**. |
+| H2 sarcasm accuracy > 70% | Letter **YES** (clash acc 79.5%). Beats always-not-sarcasm dummy **NO** (dummy 79.5%). Clash P/R/F1 **0.50 / 0.48 / 0.49**. |
+| H3 vs heavy model | **NOT settled.** n=4 Qwen2-VL-2B smoke: ours faster and <1 GiB; accuracy drop **0.25** (FAIL if taken at face value). n=40/150 failed (page file). |
+| RQ2 sarcasm F1 ≥10 pp vs unimodal | Full set **YES** (+24.5 pp). Organic-only **YES** (+11.3 pp). |
+| §8.3 Dsem/Dsen | Full sarcasm-F1 0.47 vs aux 0.42 vs no_clip 0.29. Organic sarcasm-class F1 **0.25**. |
+| IAA | Kappa **0.778** on **230** overlap rows only. |
 
-## 5-class (OOF)
+## Organic vs crafted (retrain)
 
-- Accuracy **0.478** vs majority dummy **0.587**
-- Macro-F1 **0.480** vs dummy **0.148**
-- Unimodal (same rows) accuracy **0.291**, macro-F1 **0.239**
+| split | n | sarcasm | clash F1 | sarcasm-class F1 | RQ2 Δ |
+| --- | --- | --- | --- | --- | --- |
+| all | 1299 | 266 | 0.49 | 0.47 | +0.245 |
+| organic | 1087 | 100 | 0.33 | 0.25 | +0.113 |
+| crafted | 212 | 166 | 0.87 | — | +0.176 |
 
-## Labeling
-
-- jsonl 1186; eval **1043** (excluded 141 bootstrap)
-- Current sarcasm in jsonl 133; eval sarcasm 122 (11 were bootstrap)
-- Old `relabel` Enter-confirm is **not** blind gold. Pending blind sarcasm: **133**
-- Overlap list: `datasets/iaa_overlap_ids.txt` (133 sarcasm + 100 non-sarcasm)
-- Kappa undefined until `datasets/iaa_second.jsonl` exists (`python tasks.py iaa`)
+Clash detection on organic captions is weaker (F1 0.33, dummy acc 0.91). Mixed-set H2/RQ2 numbers are inflated by recaptions.
 
 ## Commands
 
 ```bash
-python tasks.py relabel --only sarcasm
-python tasks.py relabel --only all --ids-file datasets/iaa_overlap_ids.txt --out datasets/iaa_second.jsonl --annotator PERSON2
-python tasks.py iaa
 python tasks.py eval
-# H3 only (unsafe on this GPU):
+python -m eval.origin_split
 python tasks.py eval --heavy
 ```

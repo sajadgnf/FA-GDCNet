@@ -26,7 +26,7 @@ if str(SRC) not in sys.path:
 
 from data.schema import LABELS, write_dataset, DatasetRecord  # noqa: E402
 from inference.classifier import train, DEFAULT_CLF, DEFAULT_FEATURES  # noqa: E402
-from inference.gdrm import FEATURE_NAMES  # noqa: E402
+from inference.gdrm import CORE_FEATURE_NAMES, FEATURE_NAMES, compute_clash, features_from_array  # noqa: E402
 
 DEMO_DIR = ROOT / "datasets" / "demo"
 DEMO_JSONL = ROOT / "datasets" / "persian_multimodal_irony.jsonl"
@@ -87,10 +87,9 @@ def _feature_template(label: str, rng: np.random.Generator) -> np.ndarray:
         "positive_sarcasm": dict(Dsem=0.7, Dsen=0.85, Fvt=0.65, cos_TI=0.25, polarity_T=-0.5, polarity_T_hat=0.7),
         "negative_sarcasm": dict(Dsem=0.75, Dsen=0.9, Fvt=0.7, cos_TI=0.2, polarity_T=0.75, polarity_T_hat=-0.6),
     }[label]
-    return np.array(
-        [base[k] + noise(0.05) for k in FEATURE_NAMES],
-        dtype=np.float32,
-    )
+    core = [base[k] + noise(0.05) for k in CORE_FEATURE_NAMES]
+    core.append(compute_clash(core[4], core[5]))
+    return np.array(core, dtype=np.float32)
 
 
 def build_demo_features(dataset_path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -235,8 +234,7 @@ def main() -> int:
 
     pipe = _MiniPipe()
     sarcasm_feats = _feature_template("positive_sarcasm", np.random.default_rng(0))
-    feat_dict = dict(zip(FEATURE_NAMES, map(float, sarcasm_feats), strict=True))
-    pred = pipe.predict_from_features(DiscrepancyFeatures(**feat_dict))
+    pred = pipe.predict_from_features(features_from_array(sarcasm_feats))
     print("   sarcasm-shaped vector ->", json.dumps(pred.as_dict(), ensure_ascii=False))
 
     if not args.skip_eval:

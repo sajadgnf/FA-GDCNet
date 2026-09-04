@@ -9,6 +9,7 @@ from inference.gdrm import FEATURE_NAMES
 def test_no_clip_drops_hat_and_dsen():
     assert "polarity_T_hat" not in NO_CLIP
     assert "Dsen" not in NO_CLIP
+    assert "clash" not in NO_CLIP
     assert set(NO_CLIP) <= set(FEATURE_NAMES)
 
 

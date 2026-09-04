@@ -12,7 +12,7 @@ Stages:
   1. captions   SmolVLM        -> generated description per image
   2.     mclip      M-CLIP text then image towers (one at a time) -> Dsem, Fvt, cos_TI
   3. polarity   sentiment head on T; CLIP smile/sad for T̂ polarity
-  4. assemble   (no GPU)       -> artifacts/features.npz
+  4. assemble   CLIP affect for missing ids, then artifacts/features.npz
 
 Usage:
     python -m inference.stages                 # run all stages, resuming
@@ -316,12 +316,23 @@ def assemble(
 
     ``polarity_T_hat`` / ``Dsen`` use CLIP smile-vs-sad from ``image_affect.jsonl``
     when present; SmolVLM-caption polarity is too near-neutral to carry image mood.
+    Missing CLIP rows are scored here so new crafts are not assembled on
+    caption polarity by accident.
     """
-    from data.image_affect import polarity_vector
+    from data.image_affect import polarity_vector, score_images
 
     m = _read_done(mclip)
     p = _read_done(polarity)
     a = _read_done(affect)
+    missing_affect = [
+        {"post_id": rec.post_id, "image_path": rec.image_path}
+        for rec in records
+        if rec.post_id not in a
+    ]
+    if missing_affect:
+        log.info("CLIP image affect: scoring %d missing rows", len(missing_affect))
+        score_images(missing_affect, cache=affect)
+        a = _read_done(affect)
     used_clip = 0
 
     X_rows: list[np.ndarray] = []

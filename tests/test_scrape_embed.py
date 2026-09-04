@@ -30,6 +30,11 @@ def test_normalize_post_refs() -> None:
     assert refs == [PostRef("ABC", "p"), PostRef("XYZ", "reel")]
 
 
+def test_post_ref_keeps_harvest_caption() -> None:
+    ref = PostRef("ABC", "p", "کپشن فارسی تست")
+    assert ref.caption == "کپشن فارسی تست"
+
+
 def test_import_from_links_mocked(tmp_path: Path, monkeypatch) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Iterable, Iterator, Protocol
 
 from .preprocess import is_persian_enough, is_spam_caption, preprocess_caption
+from .sarcasm_candidates import is_political_caption
 
 try:
     from .face_filter import has_face as _image_has_face
@@ -72,8 +73,8 @@ class ScrapedPost(Protocol):
     def download_image(self, target: Path) -> Path: ...
 
 
-def _existing_shortcodes(jsonl_path: Path) -> set[str]:
-    seen = _load_ignored_shortcodes()
+def _jsonl_shortcodes(jsonl_path: Path) -> set[str]:
+    seen: set[str] = set()
     if jsonl_path.exists():
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -83,6 +84,10 @@ def _existing_shortcodes(jsonl_path: Path) -> set[str]:
                 with suppress(json.JSONDecodeError, KeyError):
                     seen.add(json.loads(line)["post_id"])
     return seen
+
+
+def _existing_shortcodes(jsonl_path: Path) -> set[str]:
+    return _load_ignored_shortcodes() | _jsonl_shortcodes(jsonl_path)
 
 
 def _persist(
@@ -123,6 +128,11 @@ def _persist(
                 _remember_ignored(sc)
                 log.debug("skip spam/bait caption %s", sc)
                 continue
+            if is_political_caption(caption):
+                skipped_spam += 1
+                _remember_ignored(sc)
+                log.debug("skip political caption %s", sc)
+                continue
             try:
                 image_path = post.download_image(image_dir / f"{sc}.jpg")
             except Exception as exc:  # noqa: BLE001
@@ -130,9 +140,8 @@ def _persist(
                 continue
             if require_face and not _image_has_face(image_path, min_size=min_face_size):
                 skipped_no_face += 1
-                _remember_ignored(sc)
                 seen.add(sc)
-                log.debug("skip %s: no face detected (added to ignore list)", sc)
+                log.debug("skip %s: no face detected", sc)
                 with suppress(OSError):
                     image_path.unlink()
                 continue
@@ -146,11 +155,7 @@ def _persist(
             written += 1
             time.sleep(delay)
     if require_face and skipped_no_face:
-        log.info(
-            "skipped %d posts with no detected face (IDs saved to %s)",
-            skipped_no_face,
-            IGNORED_IDS_FILE,
-        )
+        log.info("skipped %d posts with no detected face", skipped_no_face)
     if skipped_spam:
         log.info("skipped %d spam/bait captions (saved to %s)", skipped_spam, IGNORED_IDS_FILE)
     return written

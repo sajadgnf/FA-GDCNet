@@ -22,11 +22,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .preprocess import is_persian_enough, is_spam_caption, preprocess_caption
-from .sarcasm_candidates import is_sarcasm_candidate_caption
+from .sarcasm_candidates import is_political_caption, is_sarcasm_candidate_caption
 from .scrape import (
     DEFAULT_RAW_DIR,
     IGNORED_IDS_FILE,
     _existing_shortcodes,
+    _jsonl_shortcodes,
     _remember_ignored,
 )
 
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page
 
 log = logging.getLogger(__name__)
+
+
+class FetchStall(RuntimeError):
+    """Instagram stopped serving post pages; the collector should pause and retry later."""
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -129,6 +134,7 @@ _POST_EXTRACT_JS = """() => {
 class PostRef:
     shortcode: str
     kind: str = "p"
+    caption: str = ""
 
 
 def post_ref(shortcode: str, kind: str = "p") -> PostRef:
@@ -371,12 +377,12 @@ def _ensure_post_link_visible(
     def _scan_grid() -> bool:
         page.evaluate("window.scrollTo(0, 0)")
         time.sleep(0.4)
-        for _ in range(35):
+        for _ in range(12):
             if _find_and_center():
                 time.sleep(0.6)
                 return True
             page.evaluate("window.scrollBy(0, window.innerHeight * 0.75)")
-            time.sleep(0.35)
+            time.sleep(0.25)
         return False
 
     if _find_and_center() or _scan_grid():
@@ -507,23 +513,25 @@ def fetch_post_via_browser(
     """
     strategies: list[tuple[str, Any]] = []
     modal_kw = {"kind": kind, "timeout_ms": timeout_ms, "hashtag_url": hashtag_url}
-    if prefer_modal:
-        strategies.append(("modal", lambda: _fetch_post_via_modal(page, shortcode, **modal_kw)))
-    if not lightweight_only:
+    if lightweight_only:
         strategies.extend(
             [
                 ("embed-fetch", lambda: _fetch_post_embed_inpage(page, shortcode, kind=kind, timeout_ms=timeout_ms)),
                 ("embed-goto", lambda: _fetch_post_embed_goto(page, shortcode, kind=kind, timeout_ms=timeout_ms)),
             ]
         )
-    elif not prefer_modal:
-        strategies.append(
-            ("embed-fetch", lambda: _fetch_post_embed_inpage(page, shortcode, kind=kind, timeout_ms=timeout_ms))
+    else:
+        if prefer_modal:
+            strategies.append(("modal", lambda: _fetch_post_via_modal(page, shortcode, **modal_kw)))
+        strategies.extend(
+            [
+                ("embed-fetch", lambda: _fetch_post_embed_inpage(page, shortcode, kind=kind, timeout_ms=timeout_ms)),
+                ("embed-goto", lambda: _fetch_post_embed_goto(page, shortcode, kind=kind, timeout_ms=timeout_ms)),
+            ]
         )
-    if not prefer_modal:
-        strategies.append(("modal", lambda: _fetch_post_via_modal(page, shortcode, **modal_kw)))
-    if not lightweight_only:
-        strategies.append(("full-goto", lambda: _fetch_post_full_goto(page, shortcode, kind=kind, timeout_ms=timeout_ms)))
+        if not prefer_modal:
+            strategies.append(("modal", lambda: _fetch_post_via_modal(page, shortcode, **modal_kw)))
+            strategies.append(("full-goto", lambda: _fetch_post_full_goto(page, shortcode, kind=kind, timeout_ms=timeout_ms)))
 
     errors: list[str] = []
     best_image: str | None = None
@@ -543,7 +551,7 @@ def fetch_post_via_browser(
             errors.append(f"{name}: {exc}")
             log.debug("fetch %s via %s failed: %s", shortcode, name, exc)
     if best_image:
-        raise RuntimeError(f"got image but no caption for {shortcode}: {'; '.join(errors)}")
+        return "", best_image
     raise RuntimeError(f"all fetch strategies failed for {shortcode}: {'; '.join(errors)}")
 
 
@@ -615,6 +623,8 @@ def import_shortcodes(
     sarcasm_candidates: bool = False,
     prefer_modal: bool = False,
     hashtag_url: str | None = None,
+    respect_ignore: bool = True,
+    fetch_lightweight: bool = False,
 ) -> int:
     if require_face:
         try:
@@ -634,15 +644,17 @@ def import_shortcodes(
     jsonl_path = out_dir / f"{pool_name}.jsonl"
     image_dir = out_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
-    seen = _existing_shortcodes(jsonl_path)
+    seen = _existing_shortcodes(jsonl_path) if respect_ignore else _jsonl_shortcodes(jsonl_path)
 
     written = 0
     skipped_no_face = 0
     skipped_no_caption = 0
     skipped_not_sarcasm = 0
     consecutive_fetch_failures = 0
-    lightweight_fetch = False
-    post_timeout_ms = max(int(timeout * 1000), 120_000)
+    lightweight_fetch = fetch_lightweight
+    stall_after = 40 if fetch_lightweight or not respect_ignore else 6
+    # Do not floor this at 120s: each failed strategy would then hang for minutes.
+    post_timeout_ms = max(8_000, int(timeout * 1000))
     with jsonl_path.open("a", encoding="utf-8") as out:
         for i, ref in enumerate(refs):
             shortcode = ref.shortcode
@@ -661,7 +673,7 @@ def import_shortcodes(
                         kind=ref.kind,
                         timeout_ms=post_timeout_ms,
                         prefer_modal=prefer_modal,
-                        lightweight_only=lightweight_fetch,
+                        lightweight_only=lightweight_fetch or fetch_lightweight,
                         hashtag_url=hashtag_url,
                     )
                 else:
@@ -670,7 +682,7 @@ def import_shortcodes(
                 consecutive_fetch_failures += 1
                 lightweight_fetch = consecutive_fetch_failures >= 2
                 log.warning("skip %s: fetch failed (%s)", shortcode, exc)
-                if consecutive_fetch_failures >= 3:
+                if consecutive_fetch_failures >= 3 and stall_after <= 6:
                     pause = min(60, 15 * consecutive_fetch_failures)
                     log.warning(
                         "Pausing %ds after %d consecutive fetch failures (rate limit? use --delay 8)",
@@ -678,16 +690,22 @@ def import_shortcodes(
                         consecutive_fetch_failures,
                     )
                     time.sleep(pause)
-                if consecutive_fetch_failures >= 6:
+                if consecutive_fetch_failures >= stall_after:
                     log.error(
                         "Stopping import after %d consecutive failures — wait 10 min, retry with --delay 8",
                         consecutive_fetch_failures,
                     )
-                    break
+                    raise FetchStall(
+                        f"Instagram fetch stalled after {consecutive_fetch_failures} failures"
+                    )
                 time.sleep(delay)
                 continue
             consecutive_fetch_failures = 0
-            lightweight_fetch = False
+            if not fetch_lightweight:
+                lightweight_fetch = False
+
+            if not str(caption_raw).strip() and ref.caption:
+                caption_raw = ref.caption
 
             caption = preprocess_caption(caption_raw)
             if not caption:
@@ -702,7 +720,14 @@ def import_shortcodes(
                 _remember_ignored(shortcode)
                 seen.add(shortcode)
                 continue
-            if sarcasm_candidates and not is_sarcasm_candidate_caption(caption):
+            if is_political_caption(caption):
+                _remember_ignored(shortcode)
+                seen.add(shortcode)
+                log.info("skip %s: political caption", shortcode)
+                continue
+            if sarcasm_candidates and not is_sarcasm_candidate_caption(
+                caption, allow_weak_cues=False
+            ):
                 skipped_not_sarcasm += 1
                 log.debug("skip %s: caption lacks sarcasm/irony cues", shortcode)
                 continue
@@ -721,7 +746,6 @@ def import_shortcodes(
             if require_face and _image_has_face is not None:
                 if not _image_has_face(dest, min_size=min_face_size):
                     skipped_no_face += 1
-                    _remember_ignored(shortcode)
                     seen.add(shortcode)
                     dest.unlink(missing_ok=True)
                     log.info("skip %s: no face detected", shortcode)
@@ -733,6 +757,7 @@ def import_shortcodes(
                 "image_path": str(dest),
             }
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            out.flush()
             seen.add(shortcode)
             written += 1
             log.info("imported %s", shortcode)
@@ -742,11 +767,7 @@ def import_shortcodes(
     if skipped_no_caption:
         log.info("skipped %d posts with empty caption", skipped_no_caption)
     if skipped_no_face:
-        log.info(
-            "skipped %d posts with no face (IDs saved to %s)",
-            skipped_no_face,
-            IGNORED_IDS_FILE,
-        )
+        log.info("skipped %d posts with no face (not added to ignore list)", skipped_no_face)
     if skipped_not_sarcasm:
         log.info("skipped %d posts with no sarcasm cues in caption (plain selfies)", skipped_not_sarcasm)
     log.info("imported %d posts into %s", written, jsonl_path)

@@ -110,11 +110,11 @@ def slice_records_from_cache(
         ys.append(str(rec.label))
     if n_missing:
         log.warning(
-            "eval cache missing %d/%d eligible ids; using %d cached rows",
+            "eval cache missing %d/%d eligible ids; ignoring cache",
             n_missing,
             len(records),
-            len(xs),
         )
+        return None
     if not xs:
         return None
     return np.stack(xs, axis=0), np.asarray(ys, dtype=object)

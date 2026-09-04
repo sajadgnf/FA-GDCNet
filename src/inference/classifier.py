@@ -29,7 +29,7 @@ from sklearn.svm import LinearSVC
 from data.eval_set import slice_to_eval_set
 from data.schema import LABELS, iter_dataset
 
-from .gdrm import FEATURE_NAMES, DiscrepancyFeatures
+from .gdrm import FEATURE_NAMES, DiscrepancyFeatures, with_clash_column
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def _cross_validated_macro_f1(
 def features_from_records(records: Iterable[dict]) -> tuple[np.ndarray, np.ndarray]:
     """Materialize the (X, y) numpy arrays for an already-feature-cached set.
 
-    Each record SHOULD already contain `features` (a 6-list) and `label`.
+    Each record SHOULD already contain `features` (GDRM vector) and `label`.
     Used by the eval scripts which pre-compute features once and reuse them.
     """
     X_rows: list[np.ndarray] = []
@@ -286,7 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.from_cache and args.features_cache.exists():
         npz = np.load(args.features_cache, allow_pickle=True)
         ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
-        X, y, _, n_excl = slice_to_eval_set(args.dataset, npz["X"], npz["y"], ids)
+        X, y, _, n_excl = slice_to_eval_set(
+            args.dataset, with_clash_column(npz["X"]), npz["y"], ids
+        )
         log.info("train from cache after eval filter: n=%d excluded_bootstrap=%d", len(y), n_excl)
     else:
         X, y, ids = compute_dataset_features(args.dataset, cache_path=args.features_cache)

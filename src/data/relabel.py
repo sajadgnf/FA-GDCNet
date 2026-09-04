@@ -20,7 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from .schema import LABELS
-from .tags import BLIND_REVIEW_TAG
+from .tags import BLIND_REVIEW_TAG, CANDIDATE_TAG
 
 DEFAULT_DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 DEFAULT_FEATURES = Path("artifacts") / "features.npz"
@@ -206,6 +206,8 @@ def matching_indices(
             ok = True
         elif only == "sarcasm":
             ok = lab in SARCASM
+        elif only == "candidates":
+            ok = CANDIDATE_TAG in annotators_of(row)
         else:
             ok = lab == only
         if not ok:
@@ -314,6 +316,8 @@ def _prompt_loop(
     secondary_out: Path | None,
 ) -> tuple[int, int]:
     print("Keys:  1 positive  2 negative  3 neutral  4 positive_sarcasm  5 negative_sarcasm")
+    print("       Sarcasm needs a clash: text and face pull opposite ways.")
+    print("       Laughing photo + bland/neutral caption → 1 (humor) or 3, not 4/5.")
     print("       1–5 required (current label is hidden).  s = skip   q = quit\n")
     recorded = 0
     changed = 0
@@ -360,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument(
         "--only",
-        choices=("all", "sarcasm", "positive", "negative", "neutral"),
+        choices=("all", "sarcasm", "candidates", "positive", "negative", "neutral"),
         default="sarcasm",
         help="Which rows to review when --ids-file is not set (default: sarcasm).",
     )

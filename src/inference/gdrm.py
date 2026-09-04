@@ -14,6 +14,8 @@ Auxiliary features added to the vector:
 - `cos(mCLIP_text(T), mCLIP_image(I))`
 - polarity scalar of `T` (text sentiment head) and of the image
   (`polarity_T_hat`: CLIP smile-vs-sad, not SmolVLM-caption polarity)
+- `clash = -polarity_T * polarity_T_hat` (positive when text and face oppose;
+  a linear head cannot learn that product from the two scalars alone)
 
 `T̂` still feeds `Dsem` and `Fvt`. SmolVLM-256M captions under the 1 GiB budget
 are often affect-free, so image polarity uses CLIP facial affect instead of
@@ -105,6 +107,16 @@ def compute_dsen(polarity_T, polarity_T_hat) -> float:
     return polarity_l1(polarity_T, polarity_T_hat)
 
 
+def compute_clash(polarity_T: float, polarity_T_hat: float) -> float:
+    """Opposite-sign polarities → positive clash; same-sign → negative.
+
+    Linear classifiers see `polarity_T` and `polarity_T_hat` separately and
+    cannot form this interaction unless it is an explicit column.
+    """
+    val = float(-float(polarity_T) * float(polarity_T_hat))
+    return val if np.isfinite(val) else 0.0
+
+
 def compute_fvt(image_emb_I, text_emb_T_hat) -> float:
     """`Fvt = cos(mCLIP_image(I), mCLIP_text(T_hat))`."""
     return cosine_similarity(image_emb_I, text_emb_T_hat)
@@ -113,7 +125,7 @@ def compute_fvt(image_emb_I, text_emb_T_hat) -> float:
 # ------------ Feature vector --------------------------------------------------
 
 # Canonical feature order; downstream classifier columns must match.
-FEATURE_NAMES: tuple[str, ...] = (
+CORE_FEATURE_NAMES: tuple[str, ...] = (
     "Dsem",
     "Dsen",
     "Fvt",
@@ -121,11 +133,15 @@ FEATURE_NAMES: tuple[str, ...] = (
     "polarity_T",
     "polarity_T_hat",
 )
+FEATURE_NAMES: tuple[str, ...] = CORE_FEATURE_NAMES + ("clash",)
+_N_CORE = len(CORE_FEATURE_NAMES)
+_POLARITY_T_IDX = CORE_FEATURE_NAMES.index("polarity_T")
+_POLARITY_HAT_IDX = CORE_FEATURE_NAMES.index("polarity_T_hat")
 
 
 @dataclass
 class DiscrepancyFeatures:
-    """Six-dimensional feature vector consumed by the sklearn classifier."""
+    """GDRM vector consumed by the sklearn classifier (core signals + clash)."""
 
     Dsem: float
     Dsen: float
@@ -134,9 +150,21 @@ class DiscrepancyFeatures:
     polarity_T: float
     polarity_T_hat: float
 
+    @property
+    def clash(self) -> float:
+        return compute_clash(self.polarity_T, self.polarity_T_hat)
+
     def as_array(self) -> np.ndarray:
         arr = np.array(
-            [self.Dsem, self.Dsen, self.Fvt, self.cos_TI, self.polarity_T, self.polarity_T_hat],
+            [
+                self.Dsem,
+                self.Dsen,
+                self.Fvt,
+                self.cos_TI,
+                self.polarity_T,
+                self.polarity_T_hat,
+                self.clash,
+            ],
             dtype=np.float32,
         )
         return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -149,7 +177,43 @@ class DiscrepancyFeatures:
             "cos_TI": self.cos_TI,
             "polarity_T": self.polarity_T,
             "polarity_T_hat": self.polarity_T_hat,
+            "clash": self.clash,
         }
+
+
+def features_from_array(x) -> DiscrepancyFeatures:
+    """Rebuild features from a cache row (6 core columns, clash is derived)."""
+    arr = np.nan_to_num(
+        np.asarray(x, dtype=np.float64).reshape(-1),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    if arr.size < _N_CORE:
+        raise ValueError(f"expected at least {_N_CORE} feature columns, got {arr.size}")
+    return DiscrepancyFeatures(
+        Dsem=float(arr[0]),
+        Dsen=float(arr[1]),
+        Fvt=float(arr[2]),
+        cos_TI=float(arr[3]),
+        polarity_T=float(arr[4]),
+        polarity_T_hat=float(arr[5]),
+    )
+
+
+def with_clash_column(X: np.ndarray) -> np.ndarray:
+    """Append `clash` to a 6-column cache, or pass through a current matrix."""
+    mat = np.asarray(X, dtype=np.float32)
+    if mat.ndim != 2:
+        raise ValueError(f"expected 2-d feature matrix, got shape {mat.shape}")
+    n = len(FEATURE_NAMES)
+    if mat.shape[1] == n:
+        return mat
+    if mat.shape[1] == _N_CORE:
+        clash = -mat[:, _POLARITY_T_IDX] * mat[:, _POLARITY_HAT_IDX]
+        clash = np.nan_to_num(clash, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        return np.concatenate([mat, clash[:, None]], axis=1)
+    raise ValueError(f"expected {_N_CORE} or {n} feature columns, got {mat.shape[1]}")
 
 
 def build_feature_vector(
