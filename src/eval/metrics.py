@@ -32,7 +32,7 @@ from inference.classifier import (
     DEFAULT_FEATURES,
     compute_dataset_features,
 )
-from inference.gdrm import with_clash_column
+from inference.gdrm import features_for_eval, with_clash_column
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ def _load_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray, 
         ids = list(ids)
         X = with_clash_column(X)
     X, y, ids, n_excl = slice_to_eval_set(dataset, X, y, ids)
+    X = features_for_eval(X, ids, dataset)
     return X, y, ids, n_excl
 
 

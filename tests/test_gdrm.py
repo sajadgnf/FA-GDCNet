@@ -362,3 +362,25 @@ def test_compute_clash_positive_when_polarities_oppose():
     assert seven.shape == (1, 7)
     assert seven[0, 6] == pytest.approx(0.2)
 
+
+def test_compute_clash_zeros_weak_polarities():
+    from inference.gdrm import compute_clash, with_clash_column
+
+    assert compute_clash(0.10, -0.90) == 0.0
+    assert compute_clash(0.80, -0.10) == 0.0
+    stale = np.array([[0.1, 0.2, 0.3, 0.4, 0.10, -0.90, 0.99]], dtype=np.float32)
+    refreshed = with_clash_column(stale)
+    assert refreshed[0, 6] == pytest.approx(0.0)
+
+
+def test_apply_caption_guards_zeros_thin_hashtag_walls():
+    from inference.gdrm import apply_caption_guards
+
+    X = np.array([[0.2, 1.2, 0.5, 0.1, 0.8, -0.7, 0.56]], dtype=np.float32)
+    out = apply_caption_guards(X, ["#سلفی #استایل #عکس"])
+    assert out[0, 4] == pytest.approx(0.0)
+    assert out[0, 6] == pytest.approx(0.0)
+    kept = apply_caption_guards(X, ["خدا وفاداری را به سگ داد تا بفهمی از چی کمتری"])
+    assert kept[0, 4] == pytest.approx(0.8)
+    assert kept[0, 6] == pytest.approx(0.56)
+

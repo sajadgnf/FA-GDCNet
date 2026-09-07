@@ -723,7 +723,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument(
         "--heavy",
         action="store_true",
-        help="Also run Qwen2-VL Hypothesis 3 (can crash or pin the GPU).",
+        help="Also run the heavy VLM Hypothesis 3 comparison (downloads ~4GB).",
     )
     p_eval.set_defaults(func=cmd_eval)
 

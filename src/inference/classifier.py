@@ -29,7 +29,7 @@ from sklearn.svm import LinearSVC
 from data.eval_set import slice_to_eval_set
 from data.schema import LABELS, iter_dataset
 
-from .gdrm import FEATURE_NAMES, DiscrepancyFeatures, with_clash_column
+from .gdrm import FEATURE_NAMES, DiscrepancyFeatures, features_for_eval, with_clash_column
 
 log = logging.getLogger(__name__)
 
@@ -286,13 +286,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.from_cache and args.features_cache.exists():
         npz = np.load(args.features_cache, allow_pickle=True)
         ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
-        X, y, _, n_excl = slice_to_eval_set(
+        X, y, ids, n_excl = slice_to_eval_set(
             args.dataset, with_clash_column(npz["X"]), npz["y"], ids
         )
+        X = features_for_eval(X, ids, args.dataset)
         log.info("train from cache after eval filter: n=%d excluded_bootstrap=%d", len(y), n_excl)
     else:
         X, y, ids = compute_dataset_features(args.dataset, cache_path=args.features_cache)
-        X, y, _, n_excl = slice_to_eval_set(args.dataset, X, y, list(ids))
+        X, y, ids, n_excl = slice_to_eval_set(args.dataset, X, y, list(ids))
+        X = features_for_eval(X, ids, args.dataset)
         log.info("train after extract + eval filter: n=%d excluded_bootstrap=%d", len(y), n_excl)
 
     result = train(X, y, save_to=args.save_to)

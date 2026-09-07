@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from data.preprocess import (
+    caption_is_thin,
     is_persian_enough,
     normalize_persian,
     persian_ratio,
@@ -82,3 +83,8 @@ def test_normalize_preserves_arabic_diacritics_position():
     raw = "آرام"
     out = normalize_persian(raw)
     assert out.startswith("آ")
+
+
+def test_caption_is_thin_hashtag_wall():
+    assert caption_is_thin("#سلفی #استایل #عکس")
+    assert not caption_is_thin("خدا وفاداری را به سگ داد تا بفهمی از چی کمتری")

@@ -60,3 +60,6 @@ reports/eval_run.log
 
 # Allow markdown reports
 !reports/*.md
+
+# Local thesis drafts (not part of the shipped project)
+thesis/
