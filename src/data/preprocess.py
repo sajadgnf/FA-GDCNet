@@ -40,6 +40,7 @@ _TRANSLATION_TABLE = {ord(k): v for k, v in {**_CHAR_MAP, **_DIGIT_MAP}.items()}
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _MENTION_RE = re.compile(r"(?<![\w])@\w+")
 _WHITESPACE_RE = re.compile(r"\s+")
+_HASHTAG_RE = re.compile(r"#\S+")
 
 # Spoken spellings the frozen polarity head misreads. Orthography only, not
 # sentiment vocabulary: «خندون» is how «خندان» is often typed.
@@ -150,3 +151,14 @@ def is_spam_caption(text: str) -> bool:
     if len(text) > 450 and any(k in text for k in ("پنل", "نورپردازی", "زاویه دید", "ایربراش")):
         return True
     return False
+
+
+def caption_content_letter_count(text: str) -> int:
+    """Letters left after stripping hashtags (selfie tag-walls score near zero)."""
+    cap = _HASHTAG_RE.sub(" ", preprocess_caption(text or ""))
+    return len(_LETTER_RE.findall(cap))
+
+
+def caption_is_thin(text: str, *, min_letters: int = 8) -> bool:
+    """True when the caption is mostly hashtags / emoji, not a real sentence."""
+    return caption_content_letter_count(text) < min_letters

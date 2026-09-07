@@ -5,8 +5,9 @@ five sentiment classes. This module trains a binary LogisticRegression on the
 GDRM features (including the polarity-product ``clash`` column) and reports
 accuracy / F1 for sarcasm vs non-sarcasm.
 
-The interpretable rule is a CV-tuned cut on ``clash`` that maximizes **F1**,
-not accuracy. A Dsem accuracy cut is still written for the dummy-trap footnote:
+The interpretable rule is a CV-tuned cut on ``clash`` that maximizes
+**accuracy** (PDF §6.3(2) is an accuracy hypothesis). Precision / recall / F1
+are still reported. A Dsem accuracy cut is written for the dummy-trap footnote:
 Dsem is anti-correlated with face–caption sarcasm in this dataset.
 
 Writes `reports/sarcasm.csv`. Footer ``pdf_accuracy_bar`` is the letter of
@@ -28,7 +29,7 @@ from sklearn.model_selection import StratifiedKFold
 
 from data.eval_set import slice_to_eval_set
 from inference.classifier import DEFAULT_DATASET, DEFAULT_FEATURES, compute_dataset_features
-from inference.gdrm import FEATURE_NAMES, with_clash_column
+from inference.gdrm import FEATURE_NAMES, features_for_eval, with_clash_column
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +49,13 @@ def _load_features(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray]:
     if cache.exists():
         npz = np.load(cache, allow_pickle=True)
         ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
-        X, y, _, _ = slice_to_eval_set(
+        X, y, ids, _ = slice_to_eval_set(
             dataset, with_clash_column(npz["X"]), npz["y"], ids
         )
-        return X, y
+        return features_for_eval(X, ids, dataset), y
     X, y, ids = compute_dataset_features(dataset, cache_path=cache)
-    X, y, _, _ = slice_to_eval_set(dataset, with_clash_column(X), y, list(ids))
-    return X, y
+    X, y, ids, _ = slice_to_eval_set(dataset, with_clash_column(X), y, list(ids))
+    return features_for_eval(X, ids, dataset), y
 
 
 def _build_clf() -> LogisticRegression:
@@ -124,7 +125,9 @@ def evaluate(X: np.ndarray, y: np.ndarray, *, n_splits: int = 5) -> dict:
         precs.append(precision_score(true, preds, zero_division=0))
         recs.append(recall_score(true, preds, zero_division=0))
 
-        t_clash = pick_score_threshold(clash[train_idx], y_bin[train_idx], metric="f1")
+        t_clash = pick_score_threshold(
+            clash[train_idx], y_bin[train_idx], metric="accuracy"
+        )
         clash_thresholds.append(t_clash)
         clash_pred = _threshold_preds(clash[test_idx], t_clash)
         clash_accs.append(accuracy_score(true, clash_pred))

@@ -3,9 +3,11 @@
 Hypothesis 3 (PDF §6.3): the proposed system uses < 1 GiB, is faster than a
 heavy multimodal model, and the accuracy drop versus that model is < 5%.
 
-Default local model is Qwen2-VL-2B-Instruct — larger than SmolVLM-256M, not
-Flamingo / Idefics-80B. On OOM or import failure this writes ran=false and
-does not stamp PASS.
+Default local model is SmolVLM-Instruct (2.2B) — same Idefics3 family as the
+256M captioner, about 8× larger. Qwen2-VL-2B-Instruct was tried first and
+crashes on this Windows host (access violation while loading shards). Neither
+local stand-in is Flamingo / Idefics-80B. On OOM or import failure this writes
+ran=false and does not stamp PASS.
 
 This module is importable without transformers. The generate loop loads weights
 only in ``run_vlm``.
@@ -33,9 +35,10 @@ DEFAULT_DATASET = Path("datasets") / "persian_multimodal_irony.jsonl"
 DEFAULT_OOF = Path("reports") / "oof_preds.jsonl"
 DEFAULT_STAGED = Path("reports") / "profile_staged.json"
 DEFAULT_OUT = Path("reports") / "heavy_compare.json"
-DEFAULT_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
+DEFAULT_MODEL = "HuggingFaceTB/SmolVLM-Instruct"
 ACCURACY_DROP_MAX = 0.05
 ONE_GIB = 1024 ** 3
+MIN_H3_SAMPLES = 30
 
 _PROMPT = (
     "Classify this Persian Instagram post (caption + image) as exactly one of: "
@@ -45,9 +48,20 @@ _PROMPT = (
 
 
 def parse_label(text: str) -> str | None:
-    raw = (text or "").strip().lower().replace(" ", "_")
+    raw = (text or "").strip().lower()
+    collapsed = raw.replace(" ", "_")
     for lbl in sorted(LABELS, key=len, reverse=True):
-        if lbl in raw:
+        if lbl in collapsed or lbl in raw:
+            return lbl
+    aliases = {
+        "positive_sarcasm": ("کنایه مثبت", "positive-sarcasm"),
+        "negative_sarcasm": ("کنایه منفی", "negative-sarcasm"),
+        "positive": ("مثبت",),
+        "negative": ("منفی",),
+        "neutral": ("خنثی",),
+    }
+    for lbl, keys in aliases.items():
+        if any(k in raw or k in collapsed for k in keys):
             return lbl
     return None
 
@@ -128,6 +142,73 @@ def _empty_payload(*, model: str, reason: str) -> dict:
     }
 
 
+def _is_oom(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        "out of memory" in text
+        or "cuda oom" in text
+        or "cuda error: out of memory" in text
+        or type(exc).__name__ in {"OutOfMemoryError", "CUDAOutOfMemoryError"}
+    )
+
+
+def _vlm_class_candidates(model_id: str):
+    """Prefer the architecture that matches ``model_id``; Qwen2-VL last."""
+    import transformers
+
+    names: list[str] = []
+    lowered = model_id.lower()
+    if "qwen2-vl" in lowered or "qwen2vl" in lowered.replace("-", ""):
+        names.append("Qwen2VLForConditionalGeneration")
+    if "smolvlm" in lowered or "idefics" in lowered:
+        names.extend(["Idefics3ForConditionalGeneration", "AutoModelForImageTextToText"])
+    names.extend(
+        [
+            "AutoModelForVision2Seq",
+            "AutoModelForImageTextToText",
+            "Idefics3ForConditionalGeneration",
+            "Qwen2VLForConditionalGeneration",
+        ]
+    )
+    seen: set[str] = set()
+    out = []
+    for name in names:
+        if name in seen:
+            continue
+        seen.add(name)
+        cls = getattr(transformers, name, None)
+        if cls is not None:
+            out.append(cls)
+    if not out:
+        raise ImportError("no vision-to-text model class in this transformers build")
+    return out
+
+
+def _from_pretrained(loader, model_id: str, **kwargs):
+    try:
+        return loader.from_pretrained(model_id, local_files_only=True, **kwargs)
+    except Exception:
+        return loader.from_pretrained(model_id, **kwargs)
+
+
+def _load_vlm(model_id: str, *, dtype, device: str):
+    from transformers import AutoProcessor
+
+    processor = _from_pretrained(AutoProcessor, model_id)
+    errors: list[str] = []
+    for cls in _vlm_class_candidates(model_id):
+        try:
+            model = _from_pretrained(cls, model_id, dtype=dtype)
+            model = model.to(device)
+            model.eval()
+            return processor, model
+        except Exception as exc:  # noqa: BLE001 — try the next architecture
+            errors.append(f"{cls.__name__}: {exc}")
+    raise RuntimeError(
+        f"could not load {model_id!r}: " + "; ".join(errors[:4])
+    )
+
+
 def run_vlm(
     records: list,
     *,
@@ -137,29 +218,30 @@ def run_vlm(
     """Return (preds, latencies_s, peak_gib). Raises on load/OOM."""
     import torch
     from PIL import Image
-    from transformers import AutoProcessor
-
-    try:
-        from transformers import Qwen2VLForConditionalGeneration as ModelCls
-    except ImportError:
-        from transformers import AutoModelForVision2Seq as ModelCls
 
     if device in (None, "auto"):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    processor = AutoProcessor.from_pretrained(model_id)
     dtype = torch.float16 if device == "cuda" else torch.float32
-    model = ModelCls.from_pretrained(model_id, dtype=dtype)
-    model = model.to(device)
-    model.eval()
+    try:
+        processor, model = _load_vlm(model_id, dtype=dtype, device=device)
+    except Exception as exc:
+        if device == "cuda" and _is_oom(exc):
+            log.warning("CUDA OOM loading %s; retrying on CPU", model_id)
+            torch.cuda.empty_cache()
+            device = "cpu"
+            processor, model = _load_vlm(model_id, dtype=torch.float32, device=device)
+        else:
+            raise
 
     preds: list[str] = []
     latencies: list[float] = []
     peak_bytes = 0
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
+    model_device = next(model.parameters()).device
 
     for i, rec in enumerate(records, start=1):
-        log.info("heavy sample %d/%d post_id=%s", i, len(records), rec.post_id)
+        log.info("heavy sample %d/%d post_id=%s device=%s", i, len(records), rec.post_id, device)
         image = Image.open(rec.image_path).convert("RGB")
         prompt = _PROMPT.format(caption=rec.caption or "")
         messages = [
@@ -175,19 +257,33 @@ def run_vlm(
             messages, tokenize=False, add_generation_prompt=True
         )
         inputs = processor(text=[text], images=[image], padding=True, return_tensors="pt")
-        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        inputs = {k: v.to(model_device) if hasattr(v, "to") else v for k, v in inputs.items()}
         t0 = time.perf_counter()
-        with torch.inference_mode():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=8,
-                do_sample=False,
-            )
+        try:
+            with torch.inference_mode():
+                out = model.generate(
+                    **inputs,
+                    max_new_tokens=16,
+                    do_sample=False,
+                )
+        except Exception as exc:
+            if device == "cuda" and _is_oom(exc):
+                log.warning("CUDA OOM during generate on %s; restarting on CPU", model_id)
+                del model
+                del processor
+                import gc
+
+                gc.collect()
+                torch.cuda.empty_cache()
+                return run_vlm(records, model_id=model_id, device="cpu")
+            raise
         latencies.append(time.perf_counter() - t0)
         if device == "cuda":
             peak_bytes = max(peak_bytes, int(torch.cuda.max_memory_allocated()))
         in_len = int(inputs["input_ids"].shape[1])
         decoded = processor.batch_decode(out[:, in_len:], skip_special_tokens=True)[0]
+        if i <= 3:
+            log.info("heavy decode[%s]: %r", rec.post_id, decoded[:200])
         preds.append(parse_label(decoded) or "neutral")
 
     peak_gib = (peak_bytes / ONE_GIB) if peak_bytes else None
@@ -262,6 +358,7 @@ def evaluate(
                 ours_lat is not None and heavy_lat is not None and float(ours_lat) < float(heavy_lat)
             ),
             "post_ids": [r.post_id for r in sample],
+            "underpowered": len(sample) < MIN_H3_SAMPLES,
         }
     )
     payload["h3"] = h3_verdict(payload)
@@ -299,8 +396,7 @@ def main(argv: list[str] | None = None) -> int:
                 model=args.model,
                 reason=(
                     f"VLM worker exited with code {rc}. "
-                    "Qwen2-VL-2B-Instruct crashed while loading shards on this host "
-                    "(Windows access violation 0xC0000005 on CUDA and CPU). "
+                    f"{args.model} crashed while loading or generating on this host. "
                     "Hypothesis 3 is NOT_RUN, not PASS."
                 ),
             )

@@ -28,7 +28,12 @@ import numpy as np
 from data.schema import LABELS
 
 from .classifier import DEFAULT_CLF, load as load_clf, predict_proba
-from .gdrm import DEFAULT_FVT_THRESHOLD, DiscrepancyFeatures, build_feature_vector
+from .gdrm import (
+    DEFAULT_FVT_THRESHOLD,
+    DiscrepancyFeatures,
+    build_feature_vector,
+    guard_discrepancy_features,
+)
 
 log = logging.getLogger(__name__)
 
@@ -246,6 +251,7 @@ class Pipeline:
             polarity_probs_T=pol_T,
             polarity_probs_T_hat=pol_T_hat,
         )
+        features = guard_discrepancy_features(features, text)
         return features, T_hat
 
     def explain(self, text: str, image: Any) -> tuple[Prediction, DiscrepancyFeatures, str]:

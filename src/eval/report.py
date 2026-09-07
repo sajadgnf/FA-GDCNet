@@ -294,7 +294,7 @@ def render_report(
     lines.append("")
     clash_acc = _read_footer_value(sarcasm_rows, "mean_accuracy_clash_rule")
     lines.append(
-        "- Clash rule (CV-tuned for F1, opposite text vs face polarity): "
+        "- Clash rule (CV-tuned for accuracy, opposite text vs face polarity): "
         f"accuracy **{clash_acc or f'{mm_bin:.4f}'}**"
         + (f", precision **{clash_p}**" if clash_p else "")
         + (f", recall **{clash_r}**" if clash_r else "")
@@ -528,6 +528,10 @@ def render_report(
     lines.append(
         "- **§8.2 scenario 2** (implicit / common-knowledge sarcasm) is not evaluated."
     )
+    lines.append(
+        "- **H3** default local VLM is `HuggingFaceTB/SmolVLM-Instruct` (2.2B). "
+        "`Qwen2-VL-2B-Instruct` crashed on this Windows host while loading shards."
+    )
     lines.append("")
 
     lines.append("## How to read the scores")
@@ -542,6 +546,13 @@ def render_report(
         "be met by always predicting not-sarcasm when sarcasm is rare. Detection "
         "evidence is precision/recall/F1 and whether accuracy beats the "
         "always-not-sarcasm dummy. A previous F1≥0.40 conjunct was not in the PDF."
+    )
+    lines.append(
+        "- **`clash`** is zero unless `|polarity_T| ≥ 0.20` and `|polarity_T_hat| ≥ 0.15` "
+        "(same floors as the inference polarity-conflict rule). Weak smile/sad scores "
+        "are not counted as a text–image clash. Hashtag-only and prompt-spam captions "
+        "have text polarity zeroed so they cannot fire clash. The clash cut is "
+        "CV-tuned for **accuracy** (PDF §6.3(2))."
     )
     lines.append(
         "- **`polarity_T_hat`** in GDRM is **CLIP facial affect** (smile vs sad), "

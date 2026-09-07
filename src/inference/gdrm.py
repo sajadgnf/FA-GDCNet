@@ -15,7 +15,9 @@ Auxiliary features added to the vector:
 - polarity scalar of `T` (text sentiment head) and of the image
   (`polarity_T_hat`: CLIP smile-vs-sad, not SmolVLM-caption polarity)
 - `clash = -polarity_T * polarity_T_hat` (positive when text and face oppose;
-  a linear head cannot learn that product from the two scalars alone)
+  a linear head cannot learn that product from the two scalars alone).
+  Weak / near-neutral polarities are zeroed: clash is only defined when both
+  sides are committed, matching `pipeline.refine_label_for_polarity_conflict`.
 
 `T̂` still feeds `Dsem` and `Fvt`. SmolVLM-256M captions under the 1 GiB budget
 are often affect-free, so image polarity uses CLIP facial affect instead of
@@ -107,14 +109,34 @@ def compute_dsen(polarity_T, polarity_T_hat) -> float:
     return polarity_l1(polarity_T, polarity_T_hat)
 
 
+# Same floors as `pipeline.refine_label_for_polarity_conflict` (clash_text / hat).
+CLASH_TEXT_FLOOR = 0.20
+CLASH_IMAGE_FLOOR = 0.15
+
+
 def compute_clash(polarity_T: float, polarity_T_hat: float) -> float:
     """Opposite-sign polarities → positive clash; same-sign → negative.
 
     Linear classifiers see `polarity_T` and `polarity_T_hat` separately and
-    cannot form this interaction unless it is an explicit column.
+    cannot form this interaction unless it is an explicit column. Near-neutral
+    text or face scores are not a clash (product of two weak signs is noise).
     """
-    val = float(-float(polarity_T) * float(polarity_T_hat))
+    pt = float(polarity_T)
+    ph = float(polarity_T_hat)
+    if abs(pt) < CLASH_TEXT_FLOOR or abs(ph) < CLASH_IMAGE_FLOOR:
+        return 0.0
+    val = float(-pt * ph)
     return val if np.isfinite(val) else 0.0
+
+
+def clash_column(polarity_T, polarity_T_hat) -> np.ndarray:
+    """Vectorized ``compute_clash`` for a feature matrix."""
+    pt = np.asarray(polarity_T, dtype=np.float64).reshape(-1)
+    ph = np.asarray(polarity_T_hat, dtype=np.float64).reshape(-1)
+    raw = -pt * ph
+    weak = (np.abs(pt) < CLASH_TEXT_FLOOR) | (np.abs(ph) < CLASH_IMAGE_FLOOR)
+    out = np.where(weak, 0.0, raw)
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
 
 def compute_fvt(image_emb_I, text_emb_T_hat) -> float:
@@ -137,6 +159,7 @@ FEATURE_NAMES: tuple[str, ...] = CORE_FEATURE_NAMES + ("clash",)
 _N_CORE = len(CORE_FEATURE_NAMES)
 _POLARITY_T_IDX = CORE_FEATURE_NAMES.index("polarity_T")
 _POLARITY_HAT_IDX = CORE_FEATURE_NAMES.index("polarity_T_hat")
+_DSEN_IDX = CORE_FEATURE_NAMES.index("Dsen")
 
 
 @dataclass
@@ -202,18 +225,71 @@ def features_from_array(x) -> DiscrepancyFeatures:
 
 
 def with_clash_column(X: np.ndarray) -> np.ndarray:
-    """Append `clash` to a 6-column cache, or pass through a current matrix."""
+    """Append or refresh `clash` from the polarity columns (magnitude-gated)."""
     mat = np.asarray(X, dtype=np.float32)
     if mat.ndim != 2:
         raise ValueError(f"expected 2-d feature matrix, got shape {mat.shape}")
     n = len(FEATURE_NAMES)
-    if mat.shape[1] == n:
-        return mat
+    if mat.shape[1] not in (_N_CORE, n):
+        raise ValueError(f"expected {_N_CORE} or {n} feature columns, got {mat.shape[1]}")
+    clash = clash_column(mat[:, _POLARITY_T_IDX], mat[:, _POLARITY_HAT_IDX])
     if mat.shape[1] == _N_CORE:
-        clash = -mat[:, _POLARITY_T_IDX] * mat[:, _POLARITY_HAT_IDX]
-        clash = np.nan_to_num(clash, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
         return np.concatenate([mat, clash[:, None]], axis=1)
-    raise ValueError(f"expected {_N_CORE} or {n} feature columns, got {mat.shape[1]}")
+    out = mat.copy()
+    out[:, -1] = clash
+    return out
+
+
+def caption_polarity_scale(caption: str) -> float:
+    """Hashtag walls and prompt-spam are not a committed caption polarity."""
+    from data.preprocess import caption_is_thin, is_spam_caption
+
+    if caption_is_thin(caption) or is_spam_caption(caption):
+        return 0.0
+    return 1.0
+
+
+def apply_caption_guards(X: np.ndarray, captions: list[str]) -> np.ndarray:
+    """Zero text polarity (and refresh Dsen/clash) on thin or spam captions."""
+    mat = with_clash_column(X).copy()
+    if len(captions) != mat.shape[0]:
+        raise ValueError(f"caption count {len(captions)} != rows {mat.shape[0]}")
+    scales = np.asarray(
+        [caption_polarity_scale(c) for c in captions], dtype=np.float32
+    )
+    mat[:, _POLARITY_T_IDX] *= scales
+    pt = mat[:, _POLARITY_T_IDX]
+    ph = mat[:, _POLARITY_HAT_IDX]
+    mat[:, _DSEN_IDX] = np.abs(pt - ph)
+    return with_clash_column(mat)
+
+
+def features_for_eval(X: np.ndarray, ids: list[str], dataset) -> np.ndarray:
+    """Eval-time GDRM matrix: clash refresh + thin/spam caption guards."""
+    from pathlib import Path
+
+    from data.schema import iter_dataset
+
+    by = {r.post_id: (r.caption or "") for r in iter_dataset(Path(dataset))}
+    caps = [by.get(str(i), "") for i in ids]
+    return apply_caption_guards(X, caps)
+
+
+def guard_discrepancy_features(
+    features: DiscrepancyFeatures, caption: str
+) -> DiscrepancyFeatures:
+    """Same thin/spam guard for a live pipeline vector."""
+    if caption_polarity_scale(caption) == 1.0:
+        return features
+    pt = 0.0
+    return DiscrepancyFeatures(
+        Dsem=features.Dsem,
+        Dsen=abs(pt - float(features.polarity_T_hat)),
+        Fvt=features.Fvt,
+        cos_TI=features.cos_TI,
+        polarity_T=pt,
+        polarity_T_hat=features.polarity_T_hat,
+    )
 
 
 def build_feature_vector(

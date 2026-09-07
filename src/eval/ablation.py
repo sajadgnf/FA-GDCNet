@@ -33,7 +33,7 @@ from sklearn.model_selection import StratifiedKFold
 from data.eval_set import slice_to_eval_set
 from data.schema import LABELS
 from inference.classifier import DEFAULT_DATASET, DEFAULT_FEATURES, compute_dataset_features
-from inference.gdrm import FEATURE_NAMES, with_clash_column
+from inference.gdrm import FEATURE_NAMES, features_for_eval, with_clash_column
 
 log = logging.getLogger(__name__)
 
@@ -158,14 +158,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.features_cache.exists():
         npz = np.load(args.features_cache, allow_pickle=True)
         ids = [str(x) for x in npz["post_ids"].tolist()] if "post_ids" in npz else None
-        X, y, _, _ = slice_to_eval_set(
+        X, y, ids, _ = slice_to_eval_set(
             args.dataset, with_clash_column(npz["X"]), npz["y"], ids
         )
+        X = features_for_eval(X, ids, args.dataset)
     else:
         X, y, ids = compute_dataset_features(args.dataset, cache_path=args.features_cache)
-        X, y, _, _ = slice_to_eval_set(
+        X, y, ids, _ = slice_to_eval_set(
             args.dataset, with_clash_column(X), y, list(ids)
         )
+        X = features_for_eval(X, ids, args.dataset)
 
     rows = run(X, y)
     write_csv(rows, args.csv)

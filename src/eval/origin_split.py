@@ -31,7 +31,7 @@ from eval.baseline import DEFAULT_BASELINE_FEATURES, evaluate as baseline_evalua
 from eval.metrics import evaluate as multiclass_evaluate
 from eval.sarcasm import evaluate as binary_evaluate
 from inference.classifier import DEFAULT_DATASET, DEFAULT_FEATURES
-from inference.gdrm import with_clash_column
+from inference.gdrm import features_for_eval, with_clash_column
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ def _load_mm(dataset: Path, cache: Path) -> tuple[np.ndarray, np.ndarray, list[s
     X, y, ids, _ = slice_to_eval_set(
         dataset, with_clash_column(npz["X"]), npz["y"], ids
     )
+    X = features_for_eval(X, ids, dataset)
     return X, y, list(ids)
 
 
