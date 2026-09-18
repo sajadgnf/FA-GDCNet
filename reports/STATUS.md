@@ -12,7 +12,7 @@ Clash is magnitude-gated: zero unless `|polarity_T| ≥ 0.20` and `|polarity_T_h
 | --- | --- |
 | H1 memory < 1 GiB (staged peak) | **YES** — 0.945 GiB staged. Dashboard **4.176 GiB**. |
 | H2 sarcasm accuracy > 70% | **YES** as detection on mixed. Clash acc **78.8%**, dummy **76.4%**, P/R/F1 **0.59 / 0.36 / 0.44**. Organic also **YES** vs dummy (acc **87.0%**, dummy **86.6%**, P **0.66**). Organic recall is **0.11** (accuracy cut, not F1 cut). |
-| H3 vs heavy model | **PASS** on CPU timing of SmolVLM-Instruct 2.2B, n=40. Ours 0.94 GiB / 1.94 s vs heavy 5.06 GiB CUDA footprint / 56.5 s CPU; 5-class acc 0.55 vs 0.30 (drop **−0.25**). CUDA generate was **1.10 s** but uses 5 GiB. |
+| H3 vs heavy model | **PARTIAL_LOCAL_STANDIN** — **not** PASS. The partner is SmolVLM-Instruct 2.2B, a local stand-in, not the §3.4 heavy class (Flamingo / BLIP-2 / Idefics), and it was prompted zero-shot, so the drop-<5% component is not a valid accuracy ceiling. Measurements, n=40: ours 0.94 GiB / 1.94 s vs heavy 5.06 GiB CUDA footprint / 56.5 s CPU; 5-class acc 0.55 vs 0.30. CUDA generate was **1.10 s** — faster than ours (1.94 s), so the speed component fails on GPU. |
 | RQ2 sarcasm F1 ≥10 pp vs unimodal | Mixed **YES** (+22.8 pp). Organic-only **YES** (+13.8 pp). Absolute organic sarcasm-class F1 is **0.29**. |
 | §8.3 Dsem/Dsen | Full sarcasm-F1 0.47 vs aux 0.43 vs no_clip 0.35. Main lever is CLIP smile/sad. |
 | IAA | Kappa **0.778** on **230** overlap rows only. |
