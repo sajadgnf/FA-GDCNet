@@ -29,6 +29,9 @@ def test_h3_not_run_when_vlm_failed():
 def test_h3_pass_requires_all_three():
     ok = {
         "ran": True,
+        "n_samples": 150,
+        "heavy_is_proposal_class": True,
+        "heavy_task_adapted": True,
         "ours_under_1gib": True,
         "ours_faster": True,
         "accuracy_drop": 0.02,
@@ -37,6 +40,30 @@ def test_h3_pass_requires_all_three():
     assert h3_verdict({**ok, "accuracy_drop": 0.08}) == "FAIL"
     assert h3_verdict({**ok, "ours_faster": False}) == "FAIL"
     assert h3_verdict({**ok, "ours_under_1gib": False}) == "FAIL"
+
+
+def test_h3_local_standin_never_passes():
+    """All three components true on a local unadapted stand-in is not a pass."""
+    ok = {
+        "ran": True,
+        "n_samples": 40,
+        "heavy_is_proposal_class": False,
+        "heavy_task_adapted": False,
+        "ours_under_1gib": True,
+        "ours_faster": True,
+        "accuracy_drop": -0.25,
+    }
+    assert h3_verdict(ok) == "PARTIAL_LOCAL_STANDIN"
+    assert h3_verdict({**ok, "heavy_is_proposal_class": True}) == "PARTIAL_ZERO_SHOT_BASELINE"
+
+
+def test_h3_underpowered_and_proposal_class_helpers():
+    import eval.heavy_baseline as hb
+
+    assert h3_verdict({"ran": True, "n_samples": 4, "heavy_is_proposal_class": True}) == "UNDERPOWERED"
+    assert hb.is_proposal_heavy_class("HuggingFaceTB/SmolVLM-Instruct") is False
+    assert hb.is_proposal_heavy_class("openflamingo/OpenFlamingo-9B") is True
+    assert hb.is_proposal_heavy_class("HuggingFaceM4/idefics-80b") is True
 
 
 def test_oom_detector():

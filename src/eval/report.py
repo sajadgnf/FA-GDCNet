@@ -476,7 +476,19 @@ def render_report(
             n_h3_i = int(n_h3)
         except (TypeError, ValueError):
             n_h3_i = 0
-        if heavy.get("underpowered") or n_h3_i < 30:
+        if h3 == "PARTIAL_LOCAL_STANDIN":
+            lines.append(
+                "- The comparison partner is a **local stand-in**, not the heavy class "
+                "named in the proposal (§3.4: Flamingo / BLIP-2 / Idefics). A run against "
+                "it cannot settle H3, whatever the three components show."
+            )
+        if h3 == "PARTIAL_ZERO_SHOT_BASELINE":
+            lines.append(
+                "- The comparison partner was prompted **zero-shot**, not adapted to the "
+                "5-class task. Its accuracy is not an accuracy ceiling, so the "
+                "drop-< 5% component is not a valid test of the light pipeline."
+            )
+        if h3 == "UNDERPOWERED" or heavy.get("underpowered") or n_h3_i < 30:
             lines.append(
                 "- This run does **not** settle H3: sample size is too small "
                 "(or the load failed on a larger n)."

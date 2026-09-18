@@ -132,7 +132,8 @@ Retrain 5-fold CV on each subset. `craft-*` ids are recaptioned faces, not Insta
 - Heavy peak VRAM: **5.063865661621094** GiB
 - Ours staged peak VRAM: **0.944852352142334** GiB
 - Latency timed on CPU (56.5 s/sample). CUDA characterization on this 6 GiB laptop: 1.10 s/sample at 5.06 GiB VRAM, which is outside the 1 GiB budget H3 tests. Local VLM is larger than SmolVLM-256M but weaker than the Flamingo / Idefics-80B models named in the proposal literature review.
-- Hypothesis 3: **PASS**
+- Hypothesis 3: **PARTIAL_LOCAL_STANDIN**
+- The comparison partner is a **local stand-in**, not the heavy class named in the proposal (§3.4: Flamingo / BLIP-2 / Idefics). A run against it cannot settle H3, whatever the three components show.
 
 ## Proposal hypotheses (PDF §6.3)
 
@@ -140,7 +141,7 @@ Retrain 5-fold CV on each subset. `craft-*` ids are recaptioned faces, not Insta
 | --- | --- |
 | H1 memory < 1 GiB (staged peak) | **YES** (0.94 GiB)
 | H2 sarcasm accuracy > 70% | **YES** (letter YES (78.8%); dummy 0.7639; beats dummy YES) |
-| H3 vs heavy model (<1 GiB, faster, drop <5%) | **PASS** |
+| H3 vs heavy model (<1 GiB, faster, drop <5%) | **PARTIAL_LOCAL_STANDIN** |
 | RQ2 multimodal sarcasm F1 ≥10 pp vs unimodal | **YES** (+22.8 pp) — research question, not H3 |
 | Training-free backbones | YES (`assert_frozen`) |
 | §8.3 Dsem/Dsen improve the model | see ablation (null if aux_only ≈ full) |

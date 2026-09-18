@@ -40,6 +40,18 @@ ACCURACY_DROP_MAX = 0.05
 ONE_GIB = 1024 ** 3
 MIN_H3_SAMPLES = 30
 
+# Model families the proposal names as the "heavy" comparison class (PDF §3.4).
+# A local SmolVLM stand-in is larger than ours but is not that class, so a
+# comparison against it cannot settle Hypothesis 3 — see h3_verdict().
+PROPOSAL_HEAVY_MARKERS: tuple[str, ...] = ("flamingo", "idefics", "blip-2", "blip2")
+
+
+def is_proposal_heavy_class(model_id: str) -> bool:
+    """True when ``model_id`` belongs to the heavy class the proposal names."""
+    name = str(model_id or "").lower()
+    return any(marker in name for marker in PROPOSAL_HEAVY_MARKERS)
+
+
 _PROMPT = (
     "Classify this Persian Instagram post (caption + image) as exactly one of: "
     + ", ".join(LABELS)
@@ -104,9 +116,28 @@ def stratified_post_ids(
 
 
 def h3_verdict(payload: dict) -> str:
-    """Return PASS, FAIL, or NOT_RUN from a compare payload."""
+    """Return a Hypothesis-3 verdict from a compare payload.
+
+    ``PASS`` is reserved for the test the proposal actually states (PDF §6.3):
+    the comparison partner belongs to the heavy class named in §3.4, it was
+    adapted to the 5-class task rather than prompted zero-shot, the sample is
+    not underpowered, and all three components hold (staged memory < 1 GiB,
+    faster inference, accuracy drop < 5%). A three-way "all components true"
+    check against an unadapted local stand-in is not that test, so it reports a
+    qualified verdict instead of a pass.
+    """
     if not payload.get("ran"):
         return "NOT_RUN"
+    try:
+        n = int(payload.get("n_samples") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n < MIN_H3_SAMPLES:
+        return "UNDERPOWERED"
+    if not payload.get("heavy_is_proposal_class", False):
+        return "PARTIAL_LOCAL_STANDIN"
+    if not payload.get("heavy_task_adapted", False):
+        return "PARTIAL_ZERO_SHOT_BASELINE"
     staged_ok = bool(payload.get("ours_under_1gib"))
     faster = bool(payload.get("ours_faster"))
     drop = payload.get("accuracy_drop")
@@ -134,6 +165,11 @@ def _empty_payload(*, model: str, reason: str) -> dict:
         "ours_peak_memory_gib": None,
         "ours_under_1gib": False,
         "ours_faster": False,
+        # Whether the comparison partner is the heavy class the proposal names
+        # (Flamingo / BLIP-2 / Idefics family) and whether it was adapted to the
+        # 5-class task. Both must hold for H3 to be settleable; see h3_verdict().
+        "heavy_is_proposal_class": is_proposal_heavy_class(model),
+        "heavy_task_adapted": False,
         "h3": "NOT_RUN",
         "note": (
             "Local VLM is larger than SmolVLM-256M but weaker than the "
@@ -359,6 +395,9 @@ def evaluate(
             ),
             "post_ids": [r.post_id for r in sample],
             "underpowered": len(sample) < MIN_H3_SAMPLES,
+            # run_vlm() prompts the model zero-shot; it is never fine-tuned here.
+            "heavy_is_proposal_class": is_proposal_heavy_class(model_id),
+            "heavy_task_adapted": bool(payload.get("heavy_task_adapted", False)),
         }
     )
     payload["h3"] = h3_verdict(payload)
